@@ -193,7 +193,7 @@ describe('Chernivtsi electricity bot', () => {
 			expect(send.mock.lastCall?.[0]).toEqual(send.mock.calls[0][0]);
 			expect(send.mock.lastCall?.[0]).toMatchObject({
 				chat_id: '123',
-				text: expect.stringContaining('Outage moved from <code>13:00–16:00</code> to <code>14:00–16:00</code>'),
+				text: expect.stringContaining('<code>13:00–14:00</code> · Outage expected → Power expected'),
 			});
 			atMinute(8);
 			await worker.scheduled(cron, bindings);
@@ -209,12 +209,12 @@ describe('Chernivtsi electricity bot', () => {
 			useBackup = true;
 			atMinute(9);
 			await worker.scheduled(cron, bindings);
-			expect(send.mock.lastCall?.[0].text).toContain('Outage moved from <code>14:00–16:00</code> to <code>15:00–16:00</code>');
+			expect(send.mock.lastCall?.[0].text).toContain('<code>14:00–15:00</code> · Outage expected → Power expected');
 
 			useBackup = false;
 			atMinute(12);
 			await worker.scheduled(cron, bindings);
-			expect(send.mock.lastCall?.[0].text).toContain('Outage moved from <code>15:00–16:00</code> to <code>14:00–16:00</code>');
+			expect(send.mock.lastCall?.[0].text).toContain('<code>14:00–15:00</code> · Power expected → Outage expected');
 			atMinute(13);
 			await worker.scheduled(cron, bindings);
 			expect(send).toHaveBeenCalledTimes(4);
@@ -506,7 +506,7 @@ describe('Chernivtsi electricity bot', () => {
 			outage = 15;
 			vi.setSystemTime(now.getTime() + 360_000);
 			await press(85, 'status');
-			expect(edits.mock.lastCall?.[0].text).toContain('Outage moved from <code>14:00–16:00</code> to <code>15:00–16:00</code>');
+			expect(edits.mock.lastCall?.[0].text).toContain('<code>14:00–15:00</code> · Outage expected → Power expected');
 			offline = true;
 			vi.setSystemTime(now.getTime() + 540_000);
 			await press(86, 'status');
@@ -857,8 +857,36 @@ describe('schedule cards and reminders', () => {
 			},
 			{ ...defaultAlerts, return: false },
 		);
-		expect(revised.message).toContain('Outage moved from <code>14:30–16:00</code> to <code>14:00–16:00</code>');
+		expect(revised.message).toContain('✦ <b>Schedule updated</b>');
+		expect(revised.message).not.toContain('14:00–14:30');
 		expect(revised.message).not.toContain('09:00–10:00');
-		expect(revised.message).toContain('Added · Outage · <code>18:00–19:00</code>');
+		expect(revised.message).toContain('<code>18:00–19:00</code> · Power expected → Outage expected');
+	});
+
+	it('lists all six schedule transitions and keeps every affected time range', () => {
+		const midnight = new Date('2026-11-26T00:00:00+02:00');
+		const previous = { today: { date: '2026-11-26', slots: '001133'.repeat(8) } };
+		const revised = { schedule: { today: { ...previous.today, slots: '130301'.repeat(8) } } };
+		const alert = notification(revised, midnight, '10', 'en', { schedule: previous }).message;
+		const today = currentSchedule(revised, midnight, '10', 'en', { previous });
+		for (const message of [alert, today]) {
+			const changes = message?.split('✦ <b>Schedule updated</b>\n')[1];
+			const lines = changes?.split('\n').filter((line) => line.startsWith('<code>')) ?? [];
+			expect(lines.map((line) => line.split(' · ')[1])).toEqual([
+				'Outage expected → Power expected',
+				'Outage expected → Supply uncertain',
+				'Power expected → Outage expected',
+				'Power expected → Supply uncertain',
+				'Supply uncertain → Outage expected',
+				'Supply uncertain → Power expected',
+			]);
+			for (const line of lines) expect(line.match(/<code>/g)).toHaveLength(8);
+			expect(lines.at(-1)).toContain('<code>23:30–24:00</code>');
+		}
+
+		const ukrainian = notification(revised, midnight, '10', 'uk', { schedule: previous }).message ?? '';
+		expect(ukrainian).toContain('✦ <b>Графік оновлено</b>');
+		expect(ukrainian).toContain('Електропостачання невизначене → Очікується відключення');
+		expect(ukrainian.replace(/<[^>]+>/g, '').length).toBeLessThanOrEqual(4096);
 	});
 });

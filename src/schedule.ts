@@ -136,37 +136,21 @@ function outageIntervals(day: Day): Interval[] {
 
 function describeUpdate(before: Day, after: Day, language: Language, currentSlot: number): string {
 	const copy = messages[language];
-	const oldIntervals = outageIntervals(before).filter(({ end }) => end > currentSlot);
-	const newIntervals = outageIntervals(after).filter(({ end }) => end > currentSlot);
-	const overlaps = (first: Interval, second: Interval) =>
-		first.status === second.status && first.start < second.end && second.start < first.end;
-	const range = ({ start, end }: Interval) => `<code>${time(start)}–${time(end)}</code>`;
-	const matched = new Set<Interval>();
-	const lines: string[] = [];
-	for (const old of oldIntervals) {
-		const candidates = newIntervals.filter((interval) => overlaps(old, interval));
-		const [candidate] = candidates;
-		if (candidate && candidates.length === 1 && oldIntervals.filter((interval) => overlaps(candidate, interval)).length === 1) {
-			matched.add(candidate);
-			if (old.start !== candidate.start || old.end !== candidate.end) {
-				lines.push(copy.moved(copy.outageLabels[old.status], range(old), range(candidate)));
-			}
-		} else {
-			lines.push(copy.removed(copy.outageLabels[old.status], range(old)));
+	const changes = new Map<string, string[]>();
+	for (let start = 0; start < after.slots.length;) {
+		const oldStatus = before.slots[start] as Status;
+		const newStatus = after.slots[start] as Status;
+		let end = start + 1;
+		while (before.slots[end] === oldStatus && after.slots[end] === newStatus) end++;
+		if (oldStatus !== newStatus && end > currentSlot) {
+			const transition = `${copy.status[oldStatus]} → ${copy.status[newStatus]}`;
+			const ranges = changes.get(transition) ?? [];
+			ranges.push(`<code>${time(start)}–${time(end)}</code>`);
+			changes.set(transition, ranges);
 		}
+		start = end;
 	}
-	for (const interval of newIntervals) {
-		if (matched.has(interval)) continue;
-		const previousSlots = before.slots.slice(interval.start, interval.end);
-		if (interval.status === '3' && /^1+$/.test(previousSlots)) {
-			lines.push(`${range(interval)} · ${copy.status['1']} → ${copy.status['3']}`);
-		} else {
-			lines.push(copy.added(copy.outageLabels[interval.status], range(interval)));
-		}
-	}
-	const visibleChanges = 5;
-	if (lines.length > visibleChanges)
-		lines.splice(visibleChanges, lines.length, `<i>${copy.moreChanges(lines.length - visibleChanges)}</i>`);
+	const lines = Array.from(changes, ([transition, ranges]) => `${ranges.join(', ')} · ${transition}`);
 	return [`✦ ${copy.updated}`, ...lines].join('\n');
 }
 
