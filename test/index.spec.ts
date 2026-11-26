@@ -123,7 +123,7 @@ describe('Chernivtsi electricity bot', () => {
 		}
 	});
 
-	it('does not send a reversion when the other source still has its already observed schedule', () => {
+	it('does not send a reversion when the backup still has its already observed schedule', () => {
 		const now = new Date('2026-11-26T10:00:00+02:00');
 		const original = { today: { date: '2026-11-26', slots: '1'.repeat(48) } };
 		const revised = { today: { date: '2026-11-26', slots: '1'.repeat(26) + '0'.repeat(6) + '1'.repeat(16) } };
@@ -141,16 +141,18 @@ describe('Chernivtsi electricity bot', () => {
 	});
 
 	it('ignores changes for tomorrow and retries a change for today if Telegram rejects the send', async () => {
-		const now = new Date('2026-11-26T10:00:00+02:00');
+		const now = new Date('2026-11-26T01:00:00+02:00');
 		const cron = createScheduledController({ cron: '* * * * *' });
 		vi.useFakeTimers({ toFake: ['Date'] });
 		const atMinute = (minute: number) => vi.setSystemTime(now.getTime() + minute * 60_000);
 		atMinute(0);
 		let todayStart = 13;
 		let tomorrowStart = 14;
+		let useBackup = false;
 		const send = vi.fn<(_: { chat_id: string; text: string }) => Response>(() => Response.json({ ok: true }));
 		const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, options) => {
 			if (url === source) {
+				if (useBackup) return new Response(null, { status: 503 });
 				return new Response(
 					'<div>Ваша черга <b>10</b></div><script id="schedulePayload">' +
 						JSON.stringify({
@@ -159,6 +161,12 @@ describe('Chernivtsi electricity bot', () => {
 							tomorrow: [{ from: tomorrowStart * 60, to: 960, status: 'red' }],
 						}) +
 						'</script>',
+				);
+			}
+			if (url === backup) {
+				return new Response(
+					'<p>Оновлено 26 листопада о 00:30 Джерело: сайт Чернівціобленерго</p>' +
+						'<h3>Черга 10</h3><p>Сьогодні, 26 листопада без світла 1 год</p><p>Без світла: 15:00–16:00</p>',
 				);
 			}
 			if (String(url).endsWith('/getUpdates')) return Response.json({ ok: true, result: [] });
@@ -190,6 +198,26 @@ describe('Chernivtsi electricity bot', () => {
 			atMinute(8);
 			await worker.scheduled(cron, bindings);
 			expect(send).toHaveBeenCalledTimes(2);
+
+			await runInDurableObject(bindings.MONITOR.getByName('chernivtsi'), async (_monitor, state) => {
+				await state.storage.put('energy-ua:browser-usage', {
+					utcDay: now.toISOString().slice(0, 10),
+					usedMs: 0,
+					lastAttempt: now.getTime() + 9 * 60_000,
+				});
+			});
+			useBackup = true;
+			atMinute(9);
+			await worker.scheduled(cron, bindings);
+			expect(send.mock.lastCall?.[0].text).toContain('Outage moved from <code>14:00–16:00</code> to <code>15:00–16:00</code>');
+
+			useBackup = false;
+			atMinute(12);
+			await worker.scheduled(cron, bindings);
+			expect(send.mock.lastCall?.[0].text).toContain('Outage moved from <code>15:00–16:00</code> to <code>14:00–16:00</code>');
+			atMinute(13);
+			await worker.scheduled(cron, bindings);
+			expect(send).toHaveBeenCalledTimes(4);
 		} finally {
 			fetchMock.mockRestore();
 		}

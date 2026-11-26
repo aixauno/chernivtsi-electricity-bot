@@ -177,14 +177,11 @@ export function notification(
 	const lines: string[] = [];
 	const old = previous?.schedule.today;
 	const source = result.source;
-	const previousObservation = source && previous?.observed?.[source];
+	const previousBackup = previous?.observed?.mirror;
 	const reported = result.schedule.today;
-	// A source that still shows its previous schedule for today provides no evidence of a revision for today.
+	// An unchanged backup must not override the latest Energy UA schedule.
 	const day =
-		old?.date === reported.date &&
-		old.slots !== reported.slots &&
-		previousObservation?.date === reported.date &&
-		previousObservation.slots === reported.slots
+		source === 'mirror' && old?.date === reported.date && previousBackup?.date === reported.date && previousBackup.slots === reported.slots
 			? old
 			: reported;
 	const schedule = { today: day };
