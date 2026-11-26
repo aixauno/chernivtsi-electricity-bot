@@ -223,6 +223,45 @@ describe('Chernivtsi electricity bot', () => {
 		}
 	});
 
+	it('sends a schedule update when the 23:00 slot changes from powered to uncertain', async () => {
+		const cron = createScheduledController({ cron: '* * * * *' });
+		vi.useFakeTimers({ toFake: ['Date'] });
+		vi.setSystemTime(new Date('2026-11-26T22:57:00+02:00'));
+		const send = vi.fn();
+		let uncertain = false;
+		const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, options) => {
+			if (url === source) {
+				const today = [{ from: 960, to: 1020, status: 'red' }];
+				if (uncertain) today.push({ from: 1380, to: 1410, status: 'yellow' });
+				return new Response(
+					'<div>Ваша черга <b>10</b></div><script id="schedulePayload">' +
+						JSON.stringify({ dates: { today: '26.11.2026' }, today }) +
+						'</script>',
+				);
+			}
+			if (String(url).endsWith('/getUpdates')) return Response.json({ ok: true, result: [] });
+			expect(String(url)).toMatch(/\/sendMessage$/);
+			send(JSON.parse(String(options?.body)));
+			return Response.json({ ok: true });
+		});
+		try {
+			await worker.scheduled(cron, bindings);
+			uncertain = true;
+			vi.setSystemTime(new Date('2026-11-26T23:00:00+02:00'));
+			await worker.scheduled(cron, bindings);
+			expect(send).toHaveBeenCalledTimes(2);
+			expect(send.mock.lastCall?.[0]).toMatchObject({ chat_id: '123', parse_mode: 'HTML' });
+			const message = send.mock.lastCall?.[0].text;
+			expect(message).toMatch(/^<b>Chernivtsi · Group 10<\/b>\n────────────────────\n\n/u);
+			expect(message).toContain('✦ <b>Schedule updated</b>\n<code>23:00–23:30</code> · Power expected → Supply uncertain');
+			expect(message).not.toContain('16:00–17:00');
+			await worker.scheduled(cron, bindings);
+			expect(send).toHaveBeenCalledTimes(2);
+		} finally {
+			fetchMock.mockRestore();
+		}
+	});
+
 	it('backs off after repeated browser failures and restores the normal interval after success', async () => {
 		const date = '2026-11-26';
 		const html = await energyPage(date, '00:00 – 24:00 Є світло').text();
@@ -750,18 +789,37 @@ describe('schedule cards and reminders', () => {
 		expect(today).toContain('<b>14:00–16:00</b>');
 	});
 
-	it('hides completed outages from Today and keeps future outages', () => {
+	it('hides completed outages from Today and alerts and keeps future outages', () => {
 		const endOfOutage = new Date('2026-11-26T16:00:00+02:00');
 		const today = currentSchedule(result, endOfOutage, '10', 'en');
 		expect(today).not.toContain('14:00–16:00');
 		expect(today).toContain('<b>18:00–19:00</b>');
-		expect(notification(result, endOfOutage, '10', 'en').message).toContain('<b>14:00–16:00</b>');
+		const alert = notification(result, endOfOutage, '10', 'en').message;
+		expect(alert).not.toContain('14:00–16:00');
+		expect(alert).toContain('<b>18:00–19:00</b>');
+		const stale = currentSchedule(undefined, endOfOutage, '10', 'en', { stale: result.schedule });
+		expect(stale).toContain('<i>Previous schedule</i>');
+		expect(stale).not.toContain('14:00–16:00');
+		expect(stale).toContain('<b>18:00–19:00</b>');
 
 		const evening = new Date('2026-11-26T21:35:00+02:00');
 		expect(currentSchedule(result, evening, '10', 'en')).toContain('No more outages scheduled for today.');
 		const ukrainian = currentSchedule(result, evening, '10', 'uk');
 		expect(ukrainian).toContain('На сьогодні більше відключень не заплановано.');
 		expect(ukrainian).not.toContain('18:00–19:00');
+	});
+
+	it('marks the schedule updated even when all revised outages are already over', () => {
+		const evening = new Date('2026-11-26T23:00:00+02:00');
+		const previous = { schedule: { today: { ...result.schedule.today, slots: '1'.repeat(48) } } };
+		const today = currentSchedule(result, evening, '10', 'en', { previous: previous.schedule });
+		const alert = notification(result, evening, '10', 'en', previous);
+		for (const message of [today, alert.message]) {
+			expect(message).toContain('No more outages scheduled for today.\n\n✦ <b>Schedule updated</b>');
+			expect(message).not.toContain('14:00–16:00');
+			expect(message).not.toContain('18:00–19:00');
+		}
+		expect(notification(result, evening, '10', 'en', alert.snapshot).message).toBeUndefined();
 	});
 
 	it('sends a clear 15-minute return reminder once and honors preferences', () => {
@@ -800,7 +858,7 @@ describe('schedule cards and reminders', () => {
 			{ ...defaultAlerts, return: false },
 		);
 		expect(revised.message).toContain('Outage moved from <code>14:30–16:00</code> to <code>14:00–16:00</code>');
-		expect(revised.message).toContain('Removed · Outage · <code>09:00–10:00</code>');
+		expect(revised.message).not.toContain('09:00–10:00');
 		expect(revised.message).toContain('Added · Outage · <code>18:00–19:00</code>');
 	});
 });

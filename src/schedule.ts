@@ -70,7 +70,7 @@ function clockMinute(now: Date): number {
 	return hours * 60 + minutes;
 }
 
-type CardDetails = { checkedAt?: number; previous?: Schedule; stale?: Schedule; notices?: string[]; showFullDay?: boolean };
+type CardDetails = { checkedAt?: number; previous?: Schedule; stale?: Schedule; notices?: string[] };
 
 export function currentSchedule(
 	result: VerifiedSchedule | undefined,
@@ -102,12 +102,12 @@ export function currentSchedule(
 	}
 	const stale = result ? '' : `<i>${copy.previousSchedule}</i>\n`;
 	const todayHeading = `<b>${copy.todayButton} · ${displayDate(date, language)}</b> · <i>${copy.localTime}</i>`;
-	const todayText = today ? stale + describeDay(today, language, result && !details.showFullDay ? start : 0) : copy.scheduleUnavailable;
+	const todayText = today ? stale + describeDay(today, language, start) : copy.scheduleUnavailable;
 	const notes = details.notices ? [...details.notices] : [];
 	if (!result) notes.push(`✦ <b>${copy.unavailable}</b>`);
 	else if (!details.notices && today && details.previous?.today.date === date) {
 		const before = details.previous.today;
-		if (before.slots !== today.slots) notes.push(`✦ ${copy.updated}\n${describeChanges(before, today, language)}`);
+		if (before.slots !== today.slots) notes.push(describeUpdate(before, today, language, start));
 		else notes.push(`<i>${copy.noChanges}</i>`);
 	}
 	if (details.checkedAt !== undefined) {
@@ -134,10 +134,10 @@ function outageIntervals(day: Day): Interval[] {
 	return intervals;
 }
 
-function describeChanges(before: Day, after: Day, language: Language): string {
+function describeUpdate(before: Day, after: Day, language: Language, currentSlot: number): string {
 	const copy = messages[language];
-	const oldIntervals = outageIntervals(before);
-	const newIntervals = outageIntervals(after);
+	const oldIntervals = outageIntervals(before).filter(({ end }) => end > currentSlot);
+	const newIntervals = outageIntervals(after).filter(({ end }) => end > currentSlot);
 	const overlaps = (first: Interval, second: Interval) =>
 		first.status === second.status && first.start < second.end && second.start < first.end;
 	const range = ({ start, end }: Interval) => `<code>${time(start)}–${time(end)}</code>`;
@@ -156,12 +156,18 @@ function describeChanges(before: Day, after: Day, language: Language): string {
 		}
 	}
 	for (const interval of newIntervals) {
-		if (!matched.has(interval)) lines.push(copy.added(copy.outageLabels[interval.status], range(interval)));
+		if (matched.has(interval)) continue;
+		const previousSlots = before.slots.slice(interval.start, interval.end);
+		if (interval.status === '3' && /^1+$/.test(previousSlots)) {
+			lines.push(`${range(interval)} · ${copy.status['1']} → ${copy.status['3']}`);
+		} else {
+			lines.push(copy.added(copy.outageLabels[interval.status], range(interval)));
+		}
 	}
 	const visibleChanges = 5;
 	if (lines.length > visibleChanges)
 		lines.splice(visibleChanges, lines.length, `<i>${copy.moreChanges(lines.length - visibleChanges)}</i>`);
-	return lines.join('\n');
+	return [`✦ ${copy.updated}`, ...lines].join('\n');
 }
 
 export function notification(
@@ -185,13 +191,13 @@ export function notification(
 			? old
 			: reported;
 	const schedule = { today: day };
-	if (preferences.updates) {
-		if (old?.date !== day.date) lines.push(`✦ ${copy.initial}`);
-		else if (old.slots !== day.slots) lines.push(`✦ ${copy.updated}\n${describeChanges(old, day, language)}`);
-	}
-
 	const minute = clockMinute(now);
 	const slot = Math.floor(minute / 30);
+	if (preferences.updates) {
+		if (old?.date !== day.date) lines.push(`✦ ${copy.initial}`);
+		else if (old.slots !== day.slots) lines.push(describeUpdate(old, day, language, slot));
+	}
+
 	const slots = day.slots;
 	let next = slot + 1;
 	while (next < slots.length && (slots[next] === slots[next - 1] || slots[next] === '3')) next++;
@@ -214,8 +220,6 @@ export function notification(
 			...(warnings.length && { warnings }),
 			...(source && { observed: { ...previous?.observed, [source]: reported } }),
 		} satisfies Snapshot,
-		message: lines.length
-			? currentSchedule({ ...result, schedule }, now, group, language, { checkedAt, notices: lines, showFullDay: true })
-			: undefined,
+		message: lines.length ? currentSchedule({ ...result, schedule }, now, group, language, { checkedAt, notices: lines }) : undefined,
 	};
 }
