@@ -159,7 +159,7 @@ export function currentSchedule(schedule: Schedule, now: Date, group: string, la
 	}
 	lines.push("", describe(schedule.today, language));
 	if (schedule.tomorrow) lines.push("", describe(schedule.tomorrow, language));
-	return "<pre>" + lines.join("\n") + "</pre>";
+	return lines.join("\n");
 }
 
 export function notification(schedule: Schedule, now: Date, group: string, language: Language, previous?: Snapshot) {
@@ -179,7 +179,7 @@ export function notification(schedule: Schedule, now: Date, group: string, langu
 	if (next && warningTime && previous?.warning !== warning && previous?.warning !== warningTime + legacyLabels[next.status]) {
 		lines.push(`${copy.next} · <b>${next.time}</b>\n${copy.status[next.status]}`);
 	}
-	for (const day of changed) lines.push("<pre>" + describe(day, language) + "</pre>");
+	for (const day of changed) lines.push(describe(day, language));
 
 	return {
 		snapshot: { schedule, status, warning } satisfies Snapshot,

@@ -77,9 +77,9 @@ describe("Chernivtsi electricity bot", () => {
 			});
 			const schedule = await loadSchedule("10", now);
 			expect(currentSchedule(schedule, now, "10", "en")).toBe(
-				"<pre>CHERNIVTSI  /  GROUP 10\n─────────────────────\nNOW          Power expected\nNEXT         08:00 · Outage\n\n" +
+				"CHERNIVTSI  /  GROUP 10\n─────────────────────\nNOW          Power expected\nNEXT         08:00 · Outage\n\n" +
 				"THU 26 NOV   ·   LOCAL TIME\n− 08:00–10:30  Outage expected\n~ 10:30–11:00  Supply uncertain\n" +
-				"− 12:30–15:00  Outage expected</pre>",
+				"− 12:30–15:00  Outage expected",
 			);
 		} finally {
 			fetchMock.mockRestore();
