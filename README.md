@@ -1,5 +1,7 @@
 # Chernivtsi Electricity Bot
 
+**Power outage schedules and reminders for Chernivtsi, Ukraine, on Telegram.**
+
 ```
        .                     *                 .
                 _                         .
@@ -15,11 +17,9 @@
                   CHERNIVTSI / UA
 ```
 
-Telegram bot for checking scheduled power outages in Chernivtsi, Ukraine, and getting reminders before a planned outage or restoration.
+[Telegram commands](#telegram-commands) · [How it works](#how-it-works) · [Local development](#local-development) · [Deployment](#deployment)
 
-[Commands](#commands) · [How it works](#how-it-works) · [Local development](#local-development) · [Deployment](#deployment)
-
-## Commands
+## Telegram commands
 
 | Command                        | What it does                                                                              |
 | ------------------------------ | ----------------------------------------------------------------------------------------- |
@@ -29,21 +29,26 @@ Telegram bot for checking scheduled power outages in Chernivtsi, Ukraine, and ge
 | `/subscribe` or `/unsubscribe` | Turns alerts on or off.                                                                   |
 | `/language`                    | Switches between English and Ukrainian.                                                   |
 
-Use `/status` to choose your outage group from 1 to 12. In `/alerts`, you can set reminders for 5, 15, or 30 minutes before a scheduled change. All times use the 24-hour clock in Kyiv local time.
+- Choose your **outage group** from 1 to 12 in `/status`.
+- Set **reminders** in `/alerts` for 5, 15, or 30 minutes before a planned outage or restoration.
+
+> All schedule times use the 24-hour clock in Kyiv local time.
 
 ## How it works
 
-```
-  [Telegram] ------ webhook -----+
-                                 +--> [ElectricityMonitor] --> [Schedule]
-  [Cloudflare] ---- every min ---+
-```
+Telegram commands arrive through a webhook. A Cloudflare cron trigger checks for alerts every minute. Both use `ElectricityMonitor`, the Durable Object that stores preferences and shares schedule checks across commands and alerts.
 
-`ElectricityMonitor` is the Durable Object that stores preferences and coordinates schedule lookups. Alerts and commands reuse the latest check for each group for up to three minutes or until the date changes in Kyiv. The bot checks Energy UA first, retries through Browser Run if the request fails, and then falls back to its backup source.
+The bot reuses each group's latest check for up to three minutes or until the Kyiv date changes. When it needs a fresh schedule, it follows these steps.
+
+1. Request the group's schedule from **Energy UA**.
+2. Retry the same page through **Cloudflare Browser Run** if the direct request fails.
+3. Use the **backup source** if Browser Run can't retrieve the schedule.
 
 ## Local development
 
-Use Node.js 24 and npm to install dependencies and start the local Worker.
+You’ll need **Node.js 24** and **npm**.
+
+### Start the Worker
 
 ```sh
 npm ci
@@ -56,7 +61,7 @@ To use a Telegram bot in development, add its BotFather token to a `.dev.vars` f
 TELEGRAM_BOT_TOKEN=your_botfather_token
 ```
 
-Run the tests once and check repository formatting.
+### Run checks
 
 ```sh
 npm test -- --run
@@ -65,6 +70,8 @@ npm run format:check
 
 ## Deployment
 
+### Deploy the Worker
+
 Sign in to your Cloudflare account with Wrangler, then deploy the Worker and store the Telegram token as a secret. [Wrangler commands](https://developers.cloudflare.com/workers/wrangler/commands/)
 
 ```sh
@@ -72,7 +79,9 @@ npm run deploy
 npx wrangler secret put TELEGRAM_BOT_TOKEN
 ```
 
-The PowerShell script registers the Telegram webhook. For your own deployment, set `$webhookUrl` in [`configurar-telegram.ps1`](configurar-telegram.ps1) to your Worker URL with `/telegram` appended.
+### Register the Telegram webhook
+
+For your own deployment, set `$webhookUrl` in [`configurar-telegram.ps1`](configurar-telegram.ps1) to your Worker URL with `/telegram` appended. Then run the script in PowerShell.
 
 ```powershell
 .\configurar-telegram.ps1 -ActivarWebhook
