@@ -77,9 +77,9 @@ describe("Chernivtsi electricity bot", () => {
 			});
 			const schedule = await loadSchedule("10", now);
 			expect(currentSchedule(schedule, now, "10", "en")).toBe(
-				"CHERNIVTSI  /  GROUP 10\n─────────────────────\nNOW          Power expected\nNEXT         08:00 · Outage\n\n" +
-				"THU 26 NOV   ·   LOCAL TIME\n− 08:00–10:30  Outage expected\n~ 10:30–11:00  Supply uncertain\n" +
-				"− 12:30–15:00  Outage expected",
+				"<b>Chernivtsi · Group 10</b>\n\n<b>NOW</b> · Power expected\n<b>NEXT</b> · 08:00 · Outage\n\n" +
+				"<b>THU 26 NOV</b> · <i>Local time</i>\n− <b>08:00–10:30</b> · Outage expected\n~ <b>10:30–11:00</b> · Supply uncertain\n" +
+				"− <b>12:30–15:00</b> · Outage expected",
 			);
 		} finally {
 			fetchMock.mockRestore();
@@ -99,8 +99,8 @@ describe("Chernivtsi electricity bot", () => {
 		try {
 			const schedule = await loadSchedule("10", now, { today: { date: "2026-11-26", slots: "1".repeat(48) } });
 			expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([energyUaGroups + "10"]);
-			expect(currentSchedule(schedule, now, "10", "en")).toContain("NEXT         11:00 · Outage");
-			expect(currentSchedule(schedule, now, "10", "en")).toContain("− 16:00–19:30  Outage expected");
+			expect(currentSchedule(schedule, now, "10", "en")).toContain("<b>NEXT</b> · 11:00 · Outage");
+			expect(currentSchedule(schedule, now, "10", "en")).toContain("− <b>16:00–19:30</b> · Outage expected");
 			html = html.replace("19:30 – 24:00", "20:00 – 24:00");
 			await expect(loadSchedule("10", now)).rejects.toThrow("HTTP 403");
 			html = html.replace("20:00 – 24:00", "19:30 – 24:00").replace("26.11.2026", "25.11.2026");

@@ -124,12 +124,12 @@ function describe(day: Day, language: Language): string {
 		while (day.slots[end] === status) end++;
 		if (status !== "1") {
 			const marker = status === "0" ? "−" : "~";
-			intervals.push(`${marker} ${time(start)}–${time(end)}  ${copy.status[status]}`);
+			intervals.push(`${marker} <b>${time(start)}–${time(end)}</b> · ${copy.status[status]}`);
 		}
 		start = end;
 	}
 	const date = dateFormats[language].format(new Date(day.date)).replace(",", "");
-	return `${date.toUpperCase()}   ·   ${copy.localTime.toUpperCase()}\n${intervals.join("\n") || copy.noOutages}`;
+	return `<b>${date.toUpperCase()}</b> · <i>${copy.localTime}</i>\n${intervals.join("\n") || copy.noOutages}`;
 }
 
 function currentPeriod(schedule: Schedule, now: Date) {
@@ -151,11 +151,10 @@ function currentPeriod(schedule: Schedule, now: Date) {
 export function currentSchedule(schedule: Schedule, now: Date, group: string, language: Language): string {
 	const copy = messages[language];
 	const { status, next } = currentPeriod(schedule, now);
-	const title = copy.title(group).replace(" · ", "  /  ").toUpperCase();
-	const lines = [title, "─────────────────────", copy.nowShort.padEnd(13) + copy.status[status]];
+	const lines = [`<b>${copy.title(group)}</b>`, "", `<b>${copy.nowShort}</b> · ${copy.status[status]}`];
 	if (next) {
 		const when = next.date === schedule.today.date ? next.time : next.date + " · " + next.time;
-		lines.push(copy.nextShort.padEnd(13) + `${when} · ${copy.nextStatus[next.status]}`);
+		lines.push(`<b>${copy.nextShort}</b> · ${when} · ${copy.nextStatus[next.status]}`);
 	}
 	lines.push("", describe(schedule.today, language));
 	if (schedule.tomorrow) lines.push("", describe(schedule.tomorrow, language));
