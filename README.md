@@ -1,6 +1,6 @@
 # Chernivtsi Electricity Bot
 
-```text
+```
        .                     *                 .
                 _                         .
               .'/       .                         *
@@ -33,7 +33,7 @@ Use `/status` to choose your outage group from 1 to 12. In `/alerts`, you can se
 
 ## How it works
 
-```text
+```
   [Telegram] ------ webhook -----+
                                  +--> [ElectricityMonitor] --> [Schedule]
   [Cloudflare] ---- every min ---+
@@ -52,7 +52,7 @@ npm run dev
 
 To use a Telegram bot in development, add its BotFather token to a `.dev.vars` file next to `wrangler.jsonc`. [Environment variables and secrets](https://developers.cloudflare.com/workers/local-development/environment-variables/)
 
-```dotenv
+```
 TELEGRAM_BOT_TOKEN=your_botfather_token
 ```
 
