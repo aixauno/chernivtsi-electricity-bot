@@ -6,7 +6,7 @@
 - Use 24-hour Kyiv time. Keep source names, links, and verification footers out of Telegram messages. Do not add or replace data sources without explicit user instruction. Share the schedule check between automatic alerts and Telegram requests for up to three minutes. Recheck the configured Energy UA group page when that period expires or the Kyiv date changes, and use the previously authorized backup on failure.
 - When changing the Telegram format, update the existing message renderers and their tests alongside any new messages.
 
-## Commit messages
+## Commit messages and pull request titles
 
 - Write one short, descriptive subject in plain English. Start with a capitalized action verb and say what changed.
 - Use ordinary words, without prefixes such as `feat:` or `fix:`. Leave off the final period.
