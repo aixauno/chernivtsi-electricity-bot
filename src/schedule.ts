@@ -45,13 +45,15 @@ function time(slot: number): string {
 	return hour + (slot % 2 === 0 ? ':00' : ':30');
 }
 
-function describe(day: Day, language: Language): string {
+function describe(day: Day, language: Language, currentSlot = 0): string {
 	const copy = messages[language];
-	const intervals = outageIntervals(day).map(
-		({ start, end, status }) => `${status === '0' ? '−' : '~'} <b>${time(start)}–${time(end)}</b> · ${copy.status[status]}`,
-	);
+	const scheduled = outageIntervals(day);
+	const intervals = scheduled
+		.filter(({ end }) => end > currentSlot)
+		.map(({ start, end, status }) => `${status === '0' ? '−' : '~'} <b>${time(start)}–${time(end)}</b> · ${copy.status[status]}`);
 	const date = dateFormats[language].format(new Date(day.date)).replace(',', '');
-	return `<b>${date.toUpperCase()}</b> · <i>${copy.localTime}</i>\n${intervals.join('\n') || copy.noOutages}`;
+	const empty = scheduled.length ? copy.noRemainingOutages : copy.noOutages;
+	return `<b>${date.toUpperCase()}</b> · <i>${copy.localTime}</i>\n${intervals.join('\n') || empty}`;
 }
 
 function clockMinute(now: Date): number {
@@ -70,7 +72,7 @@ export function currentSchedule(result: VerifiedSchedule, now: Date, group: stri
 	while (next < slots.length && slots[next] === status) next++;
 	const summary = [`<b>${copy.nowShort}</b> · ${copy.status[status]}`];
 	if (next < slots.length) summary.push(`<b>${copy.nextShort}</b> · <b>${time(next)}</b> · ${copy.nextStatus[slots[next] as Status]}`);
-	return formatMessage(group, language, summary.join('\n'), describe(day, language));
+	return formatMessage(group, language, summary.join('\n'), describe(day, language, start));
 }
 
 type Interval = { start: number; end: number; status: '0' | '3' };
