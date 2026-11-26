@@ -1,19 +1,23 @@
 import { DurableObject } from 'cloudflare:workers';
-import { scheduleDate } from './energy-ua';
+import { scheduleDate, type Schedule } from './energy-ua';
 import { readBrowserSchedule } from './energy-ua-browser';
 import {
 	alertMenu,
 	defaultAlerts,
+	groupMenu,
 	languageMenu,
 	menu,
 	formatMessage,
 	messages,
 	parseCommand,
+	selectedGroup,
+	statusMenu,
 	type AlertPreferences,
 	type Language,
 } from './messages';
 import { currentSchedule, loadSchedule, notification, type Snapshot, type VerifiedSchedule } from './schedule';
-import { getUpdates, sendMessage, webhookSecret, type TelegramUpdate } from './telegram';
+import { fetchMirrorPage } from './schedule-backup';
+import { answerCallback, editMessage, getUpdates, sendMessage, webhookSecret, type TelegramUpdate } from './telegram';
 
 type BotEnv = Omit<Env, 'MONITOR' | 'OUTAGE_GROUP'> & {
 	MONITOR: DurableObjectNamespace<ElectricityMonitor>;
@@ -23,21 +27,61 @@ type BotEnv = Omit<Env, 'MONITOR' | 'OUTAGE_GROUP'> & {
 };
 
 const subscriberKey = 'telegram:subscribers';
+const legacyRecipientKey = 'telegram:recipients';
 const scheduleCheckIntervalMs = 3 * 60_000;
 const webhookPollingIntervalMs = 5 * 60_000;
+const processedUpdateLifetimeMs = 2 * 24 * 60 * 60_000;
+const pollingOffsetLifetimeMs = 24 * 60 * 60_000;
 
-type ScheduleCheck = { date: string; checkedAt: number } & ({ result: VerifiedSchedule } | { error: string });
+type PollingOffset = { offset: number; updatedAt: number };
+
+type SuccessfulCheck = { checkedAt: number; result: VerifiedSchedule };
+type ScheduleCheck = { date: string } & (
+	(SuccessfulCheck & { previous?: Schedule }) | { checkedAt: number; error: string; lastSuccess?: SuccessfulCheck }
+);
+
+const groupKey = (chatId: string) => 'telegram:group:' + chatId;
 
 async function subscribers(storage: Pick<DurableObjectStorage, 'get'>, owner: string): Promise<string[]> {
 	const saved = await storage.get<string[]>(subscriberKey);
 	if (saved) return saved;
-	const previousRecipients = (await storage.get<string[]>('telegram:recipients')) ?? [];
+	const previousRecipients = (await storage.get<string[]>(legacyRecipientKey)) ?? [];
 	return [...new Set([owner, ...previousRecipients])];
+}
+
+async function setAlerts(storage: DurableObjectStorage, owner: string, chatId: string, active: boolean) {
+	await storage.transaction(async (transaction) => {
+		const current = await subscribers(transaction, owner);
+		if (current.includes(chatId) === active) return;
+		await transaction.put(subscriberKey, active ? [...current, chatId] : current.filter((recipient) => recipient !== chatId));
+	});
 }
 
 export class ElectricityMonitor extends DurableObject<BotEnv> {
 	private running?: Promise<void>;
-	private scheduleRefresh?: Promise<ScheduleCheck>;
+	private readonly scheduleRefreshes = new Map<string, Promise<ScheduleCheck>>();
+	private readonly updatesInFlight = new Map<number, Promise<void>>();
+	private readonly chatOperations = new Map<string, Promise<void>>();
+	private mirrorPage?: Promise<string>;
+
+	constructor(ctx: DurableObjectState, env: BotEnv) {
+		super(ctx, env);
+		ctx.blockConcurrencyWhile(async () => {
+			const { sql } = ctx.storage;
+			sql.exec(`CREATE TABLE IF NOT EXISTS telegram_updates (
+				bot_id TEXT NOT NULL, update_id INTEGER NOT NULL, processed_at INTEGER NOT NULL,
+				PRIMARY KEY (bot_id, update_id)
+			)`);
+			sql.exec('CREATE INDEX IF NOT EXISTS telegram_updates_by_time ON telegram_updates (processed_at)');
+			const botId = env.TELEGRAM_BOT_TOKEN?.split(':')[0];
+			if (!botId) return;
+			const legacyKey = 'telegram:webhook:' + botId;
+			const lastUpdate = await ctx.storage.get<number>(legacyKey);
+			if (lastUpdate === undefined) return;
+			sql.exec('INSERT OR IGNORE INTO telegram_updates VALUES (?, ?, ?)', botId, lastUpdate, Date.now());
+			await ctx.storage.delete(legacyKey);
+		});
+	}
 
 	async check(): Promise<void> {
 		if (this.running) return this.running;
@@ -50,31 +94,108 @@ export class ElectricityMonitor extends DurableObject<BotEnv> {
 	}
 
 	async webhook(update: TelegramUpdate): Promise<void> {
-		const key = 'telegram:webhook:' + this.env.TELEGRAM_BOT_TOKEN?.split(':')[0];
-		if ((await this.ctx.storage.get<number>(key)) === update.update_id) return;
-		await this.reply(update);
-		await this.ctx.storage.put(key, update.update_id);
+		const token = this.env.TELEGRAM_BOT_TOKEN;
+		if (token && (update.message || update.callback_query)) await this.processUpdate(token.split(':')[0], update);
 	}
 
-	private async getSchedule(group: string, now: Date): Promise<VerifiedSchedule> {
-		const date = scheduleDate(now);
+	private async processUpdate(botId: string, update: TelegramUpdate): Promise<void> {
+		const id = update.update_id;
+		const pending = this.updatesInFlight.get(id);
+		if (pending) return pending;
+		const processing = this.replyOnce(botId, update);
+		this.updatesInFlight.set(id, processing);
+		try {
+			await processing;
+		} finally {
+			this.updatesInFlight.delete(id);
+		}
+	}
+
+	private async replyOnce(botId: string, update: TelegramUpdate): Promise<void> {
+		const { sql } = this.ctx.storage;
+		const id = update.update_id;
+		if (
+			sql
+				.exec(
+					'SELECT 1 FROM telegram_updates WHERE bot_id = ? AND update_id = ? AND processed_at > ?',
+					botId,
+					id,
+					Date.now() - processedUpdateLifetimeMs,
+				)
+				.toArray().length
+		)
+			return;
+		const chat = update.callback_query?.message?.chat ?? update.message?.chat;
+		const token = this.env.TELEGRAM_BOT_TOKEN;
+		const callbackId = update.callback_query?.id;
+		const acknowledgment =
+			token && typeof callbackId === 'string'
+				? answerCallback(token, callbackId).catch((error: Error) => console.warn(error.message))
+				: undefined;
+		if (chat && Number.isSafeInteger(chat.id)) {
+			await this.forChat(String(chat.id), () => this.reply(update));
+		}
+		await acknowledgment;
+		const now = Date.now();
+		sql.exec('DELETE FROM telegram_updates WHERE processed_at <= ?', now - processedUpdateLifetimeMs);
+		sql.exec('INSERT OR REPLACE INTO telegram_updates VALUES (?, ?, ?)', botId, id, now);
+	}
+
+	private async forChat(chatId: string, operation: () => Promise<void>): Promise<void> {
+		const previous = this.chatOperations.get(chatId);
+		const pending = previous ? previous.catch(() => {}).then(operation) : operation();
+		this.chatOperations.set(chatId, pending);
+		try {
+			await pending;
+		} finally {
+			if (this.chatOperations.get(chatId) === pending) this.chatOperations.delete(chatId);
+		}
+	}
+
+	private readMirrorPage(): Promise<string> {
+		return (this.mirrorPage ??= fetchMirrorPage().finally(() => {
+			this.mirrorPage = undefined;
+		}));
+	}
+
+	private async getSchedule(group: string): Promise<{ check: ScheduleCheck; now: Date }> {
 		const key = 'schedule:checked:' + group;
 		let check = await this.ctx.storage.get<ScheduleCheck>(key);
-		while (check?.date !== date || now.getTime() - check.checkedAt >= scheduleCheckIntervalMs) {
-			this.scheduleRefresh ??= this.refreshSchedule(key, group, now, date).finally(() => {
-				this.scheduleRefresh = undefined;
-			});
-			check = await this.scheduleRefresh;
+		let refreshed = false;
+		for (;;) {
+			const now = new Date();
+			const date = scheduleDate(now);
+			if (check?.date === date && (refreshed || now.getTime() - check.checkedAt < scheduleCheckIntervalMs)) return { check, now };
+			let pending = this.scheduleRefreshes.get(group);
+			if (!pending) {
+				pending = this.refreshSchedule(key, group, now, date, check).finally(() => this.scheduleRefreshes.delete(group));
+				this.scheduleRefreshes.set(group, pending);
+			}
+			check = await pending;
+			refreshed = true;
 		}
-		if ('error' in check) throw new Error(check.error);
-		return check.result;
 	}
 
-	private async refreshSchedule(key: string, group: string, now: Date, date: string): Promise<ScheduleCheck> {
+	private async refreshSchedule(key: string, group: string, now: Date, date: string, previous?: ScheduleCheck): Promise<ScheduleCheck> {
 		const checkedAt = now.getTime();
-		const check = await loadSchedule(group, now, (day) => readBrowserSchedule(this.env.BROWSER, this.ctx.storage, group, day, now)).then(
-			(result): ScheduleCheck => ({ date, checkedAt, result }),
-			(error: unknown): ScheduleCheck => ({ date, checkedAt, error: error instanceof Error ? error.message : String(error) }),
+		const lastSuccess =
+			previous && ('result' in previous ? { checkedAt: previous.checkedAt, result: previous.result } : previous.lastSuccess);
+		const check = await loadSchedule(
+			group,
+			now,
+			(day) => readBrowserSchedule(this.env.BROWSER, this.ctx.storage, group, day, now),
+			() => this.readMirrorPage(),
+		).then(
+			(result): ScheduleCheck => {
+				const previousSchedule = lastSuccess?.result.schedule;
+				return {
+					date,
+					checkedAt,
+					result,
+					...(previousSchedule?.today.date === date && { previous: previousSchedule }),
+				};
+			},
+			(error: unknown): ScheduleCheck => ({ date, checkedAt, error: error instanceof Error ? error.message : String(error), lastSuccess }),
 		);
 		await this.ctx.storage.put(key, check);
 		return check;
@@ -85,24 +206,40 @@ export class ElectricityMonitor extends DurableObject<BotEnv> {
 		if (!/^[1-9]\d?$/.test(group) || !token || !chatId || !/^-?\d+$/.test(chatId)) {
 			throw new Error('Missing or invalid outage group or Telegram configuration.');
 		}
-		const now = new Date();
-		const [result, commands] = await Promise.allSettled([this.getSchedule(group, now), this.readCommands(token, now)]);
-		if (result.status === 'rejected') throw result.reason;
+		const results = await Promise.allSettled([this.pollNotices(token, chatId, group), this.readCommands(token, new Date())]);
+		for (const result of results) if (result.status === 'rejected') throw result.reason;
+	}
+
+	private async pollNotices(token: string, chatId: string, group: string) {
 		const recipients = await subscribers(this.ctx.storage, chatId);
-		const deliveries = await Promise.allSettled(recipients.map((recipient) => this.sendNotice(token, recipient, group, now, result.value)));
+		const choices = await this.ctx.storage.get<string>(recipients.map(groupKey));
+		const byGroup = Map.groupBy(recipients, (recipient) => choices.get(groupKey(recipient)) ?? group);
+		if (!byGroup.size) byGroup.set(group, []);
+		const deliveries = await Promise.allSettled(
+			Array.from(byGroup, async ([selected, chats]) => {
+				const { check } = await this.getSchedule(selected);
+				if ('error' in check) throw new Error(check.error);
+				const deliveries = await Promise.allSettled(
+					chats.map((chat) => this.forChat(chat, () => this.sendNotice(token, chatId, chat, selected, check))),
+				);
+				for (const delivery of deliveries) if (delivery.status === 'rejected') throw delivery.reason;
+			}),
+		);
 		for (const delivery of deliveries) if (delivery.status === 'rejected') throw delivery.reason;
-		if (commands.status === 'rejected') throw commands.reason;
 	}
 
 	private async reply(update: TelegramUpdate): Promise<void> {
-		const { TELEGRAM_BOT_TOKEN: token, TELEGRAM_CHAT_ID: owner, OUTAGE_GROUP: group } = this.env;
+		const { TELEGRAM_BOT_TOKEN: token, TELEGRAM_CHAT_ID: owner, OUTAGE_GROUP: defaultGroup } = this.env;
+		if (!token || !owner) return;
+		if (update.callback_query) return this.replyToCallback(token, owner, defaultGroup, update.callback_query);
 		const message = update.message;
-		if (!token || !owner || !message || !Number.isSafeInteger(message.chat?.id) || typeof message.text !== 'string') return;
+		if (!message || !Number.isSafeInteger(message.chat?.id) || typeof message.text !== 'string') return;
 		const chatId = String(message.chat.id);
 		const command = parseCommand(message.text);
 		if (!command) return;
 		if (chatId !== owner && message.chat.type !== 'private') return;
 
+		const group = (await this.ctx.storage.get<string>(groupKey(chatId))) ?? defaultGroup;
 		const languageKey = 'telegram:language:' + chatId;
 		if (command === 'en' || command === 'uk') {
 			await this.ctx.storage.put(languageKey, command);
@@ -114,25 +251,22 @@ export class ElectricityMonitor extends DurableObject<BotEnv> {
 		const copy = messages[language];
 		if (command === 'alerts' || typeof command === 'object') {
 			const key = 'telegram:alerts:' + chatId;
-			const preferences = await this.ctx.storage.transaction(async (storage) => {
-				const saved = { ...defaultAlerts, ...(await storage.get<AlertPreferences>(key)) };
-				if (command === 'alerts') return saved;
-				const updated =
-					command.type === 'leadTime' ? { ...saved, minutes: command.minutes } : { ...saved, [command.kind]: command.enabled };
-				await storage.put(key, updated);
-				return updated;
-			});
+			const preferences =
+				command === 'alerts'
+					? { ...defaultAlerts, ...(await this.ctx.storage.get<AlertPreferences>(key)) }
+					: await this.ctx.storage.transaction(async (storage) => {
+							const saved = { ...defaultAlerts, ...(await storage.get<AlertPreferences>(key)) };
+							const updated =
+								command.type === 'leadTime' ? { ...saved, minutes: command.minutes } : { ...saved, [command.kind]: command.enabled };
+							await storage.put(key, updated);
+							return updated;
+						});
 			const active = (await subscribers(this.ctx.storage, owner)).includes(chatId);
 			const text = copy.alertSettings + (active ? '' : '\n\n' + copy.alertsPaused);
 			await sendMessage(token, chatId, formatMessage(group, language, text), alertMenu(language, preferences));
 		} else if (command === 'subscribe' || command === 'unsubscribe') {
 			const active = command === 'subscribe';
-			await this.ctx.storage.transaction(async (storage) => {
-				const current = await subscribers(storage, owner);
-				if (current.includes(chatId) === active) return;
-				const updated = active ? [...current, chatId] : current.filter((recipient) => recipient !== chatId);
-				await storage.put(subscriberKey, updated);
-			});
+			await setAlerts(this.ctx.storage, owner, chatId, active);
 			await sendMessage(
 				token,
 				chatId,
@@ -146,23 +280,65 @@ export class ElectricityMonitor extends DurableObject<BotEnv> {
 		} else if (command === 'language') {
 			await sendMessage(token, chatId, formatMessage(group, language, copy.language), languageMenu);
 		} else {
-			const now = new Date();
-			const status = await this.getSchedule(group, now).then(
-				(schedule) => currentSchedule(schedule, now, group, language),
-				() => formatMessage(group, language, copy.unavailable),
-			);
+			const status = await this.status(group, language);
 			const active = (await subscribers(this.ctx.storage, owner)).includes(chatId);
-			await sendMessage(token, chatId, status, menu(language, active));
+			await sendMessage(token, chatId, status, statusMenu(language, active));
 		}
+	}
+
+	private async status(group: string, language: Language) {
+		const { check, now } = await this.getSchedule(group);
+		return 'result' in check
+			? currentSchedule(check.result, now, group, language, { checkedAt: check.checkedAt, previous: check.previous })
+			: currentSchedule(undefined, now, group, language, {
+					checkedAt: check.lastSuccess?.checkedAt,
+					stale: check.lastSuccess?.result.schedule,
+				});
+	}
+
+	private async replyToCallback(
+		token: string,
+		owner: string,
+		defaultGroup: string,
+		callback: NonNullable<TelegramUpdate['callback_query']>,
+	) {
+		if (typeof callback.id !== 'string') return;
+		const { message, data } = callback;
+		if (!message || !Number.isSafeInteger(message.chat?.id) || !Number.isSafeInteger(message.message_id) || typeof data !== 'string')
+			return;
+		const chatId = String(message.chat.id);
+		if (chatId !== owner && message.chat.type !== 'private') return;
+		const selected = selectedGroup(data);
+		if (!selected && !['groups', 'status', 'pause', 'resume'].includes(data)) return;
+		const language = (await this.ctx.storage.get<Language>('telegram:language:' + chatId)) ?? 'en';
+		const group = selected ?? (await this.ctx.storage.get<string>(groupKey(chatId))) ?? defaultGroup;
+		if (data === 'groups') {
+			await editMessage(
+				token,
+				chatId,
+				message.message_id,
+				formatMessage(group, language, messages[language].chooseGroup),
+				groupMenu(language, group),
+			);
+			return;
+		}
+		if (selected) await this.ctx.storage.put(groupKey(chatId), selected);
+		if (data === 'pause' || data === 'resume') await setAlerts(this.ctx.storage, owner, chatId, data === 'resume');
+		const status = await this.status(group, language);
+		const active = (await subscribers(this.ctx.storage, owner)).includes(chatId);
+		await editMessage(token, chatId, message.message_id, status, statusMenu(language, active));
 	}
 
 	private async readCommands(token: string, now: Date): Promise<void> {
 		const botId = token.split(':')[0];
 		const retryKey = 'telegram:poll-after:' + botId;
-		const retryAt = await this.ctx.storage.get<number>(retryKey);
-		if (retryAt !== undefined && now.getTime() < retryAt) return;
 		const key = 'telegram:update-offset:' + botId;
-		const offset = await this.ctx.storage.get<number>(key);
+		const state = await this.ctx.storage.get<number | PollingOffset>([retryKey, key]);
+		const retryAt = state.get(retryKey) as number | undefined;
+		if (retryAt !== undefined && now.getTime() < retryAt) return;
+		const saved = state.get(key);
+		// Telegram can start a new sequence after a week without updates.
+		const offset = typeof saved === 'object' && now.getTime() - saved.updatedAt < pollingOffsetLifetimeMs ? saved.offset : undefined;
 		const updates = await getUpdates(token, offset);
 		if (!updates) {
 			await this.ctx.storage.put(retryKey, now.getTime() + webhookPollingIntervalMs);
@@ -170,18 +346,35 @@ export class ElectricityMonitor extends DurableObject<BotEnv> {
 		}
 		if (retryAt !== undefined) await this.ctx.storage.delete(retryKey);
 		for (const update of updates) {
-			await this.reply(update);
-			await this.ctx.storage.put(key, update.update_id + 1);
+			await this.processUpdate(botId, update);
+			await this.ctx.storage.put(key, { offset: update.update_id + 1, updatedAt: Date.now() } satisfies PollingOffset);
 		}
 	}
 
-	private async sendNotice(token: string, chatId: string, group: string, now: Date, schedule: VerifiedSchedule): Promise<void> {
-		const language = (await this.ctx.storage.get<Language>('telegram:language:' + chatId)) ?? 'en';
+	private async sendNotice(token: string, owner: string, chatId: string, group: string, check: SuccessfulCheck): Promise<void> {
 		const key = 'schedule:' + group + ':' + chatId;
-		const previous = await this.ctx.storage.get<Snapshot>(key);
-		const preferences = await this.ctx.storage.get<AlertPreferences>('telegram:alerts:' + chatId);
-		const { snapshot, message } = notification(schedule, now, group, language, previous, preferences);
-		if (message) await sendMessage(token, chatId, message);
+		const languageKey = 'telegram:language:' + chatId;
+		const preferencesKey = 'telegram:alerts:' + chatId;
+		const selectionKey = groupKey(chatId);
+		const state = await this.ctx.storage.get<string | string[] | Snapshot | AlertPreferences>([
+			key,
+			languageKey,
+			preferencesKey,
+			selectionKey,
+			subscriberKey,
+		]);
+		if ((state.get(selectionKey) ?? this.env.OUTAGE_GROUP) !== group) return;
+		const recipients = state.get(subscriberKey) as string[] | undefined;
+		const subscribed =
+			recipients?.includes(chatId) ?? (chatId === owner || (await this.ctx.storage.get<string[]>(legacyRecipientKey))?.includes(chatId));
+		if (!subscribed) return;
+		const now = new Date();
+		if (check.result.schedule.today.date !== scheduleDate(now)) return;
+		const language = (state.get(languageKey) as Language | undefined) ?? 'en';
+		const previous = state.get(key) as Snapshot | undefined;
+		const preferences = state.get(preferencesKey) as AlertPreferences | undefined;
+		const { snapshot, message } = notification(check.result, now, group, language, previous, preferences, check.checkedAt);
+		if (message) await sendMessage(token, chatId, message, statusMenu(language, true));
 		if (JSON.stringify(snapshot) !== JSON.stringify(previous)) await this.ctx.storage.put(key, snapshot);
 	}
 }

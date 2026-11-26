@@ -1,15 +1,13 @@
-import { pageText, type Day, type Schedule } from './energy-ua';
+import { fetchSchedulePage, pageText, type Day, type Schedule } from './energy-ua';
 
 const mirrorUrl = 'https://miyinvertor.com.ua/grafik/chernivtsi';
 
-export async function readMirror(group: string, date: string): Promise<Schedule> {
-	const response = await fetch(mirrorUrl, {
-		signal: AbortSignal.timeout(8_000),
-		cache: 'no-store',
-		redirect: 'manual',
-	});
-	if (!response.ok) throw new Error('Backup returned HTTP ' + response.status);
-	const today = parseMirror(await response.text(), group, date);
+export function fetchMirrorPage(): Promise<string> {
+	return fetchSchedulePage(mirrorUrl, 'Backup');
+}
+
+export async function readMirror(group: string, date: string, readPage = fetchMirrorPage): Promise<Schedule> {
+	const today = parseMirror(await readPage(), group, date);
 	if (!today) throw new Error('Backup has no verified schedule for this group today.');
 	return { today };
 }

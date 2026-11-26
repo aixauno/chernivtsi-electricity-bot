@@ -6,6 +6,19 @@ export const messages = {
 		localTime: 'Local time',
 		reminderTime: 'Kyiv time',
 		todayButton: 'Today',
+		scheduleUnavailable: 'Schedule unavailable.',
+		unknownStatus: 'Status unknown',
+		unknownTransition: 'Next change unknown',
+		previousSchedule: 'Previous schedule',
+		updatedAt: 'Updated at',
+		lastUpdate: 'Last update',
+		noChanges: 'No changes',
+		moreChanges: (count: number) => `More changes · ${count}`,
+		changeGroup: 'Change group',
+		chooseGroup: 'Choose your outage group',
+		refresh: 'Refresh',
+		pauseAlerts: 'Pause alerts',
+		resumeAlerts: 'Resume alerts',
 		alertsButton: 'Alert settings',
 		backButton: 'Back',
 		alertLabels: { updates: 'Schedule changes', cutoff: 'Outage reminder', return: 'Power return reminder' },
@@ -42,6 +55,19 @@ export const messages = {
 		localTime: 'Місцевий час',
 		reminderTime: 'Київський час',
 		todayButton: 'Сьогодні',
+		scheduleUnavailable: 'Графік недоступний.',
+		unknownStatus: 'Стан невідомий',
+		unknownTransition: 'Час наступної зміни невідомий',
+		previousSchedule: 'Попередній графік',
+		updatedAt: 'Оновлено о',
+		lastUpdate: 'Останнє оновлення',
+		noChanges: 'Без змін',
+		moreChanges: (count: number) => `Інші зміни · ${count}`,
+		changeGroup: 'Змінити чергу',
+		chooseGroup: 'Оберіть свою чергу',
+		refresh: 'Оновити',
+		pauseAlerts: 'Призупинити сповіщення',
+		resumeAlerts: 'Відновити сповіщення',
 		alertsButton: 'Налаштування сповіщень',
 		backButton: 'Назад',
 		alertLabels: { updates: 'Зміни графіка', cutoff: 'Нагадування про відключення', return: 'Нагадування про відновлення' },
@@ -94,8 +120,42 @@ export function alertMenu(language: Language, preferences: AlertPreferences) {
 }
 
 export function formatMessage(group: string, language: Language, ...sections: string[]): string {
-	const header = `<b>${messages[language].title(group)}</b>\n────────────────────`;
+	const title = messages[language].title(group).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+	const header = `<b>${title}</b>\n────────────────────`;
 	return [header, ...sections].join('\n\n');
+}
+
+export function statusMenu(language: Language, subscribed: boolean) {
+	const copy = messages[language];
+	return {
+		inline_keyboard: [
+			[
+				{ text: copy.changeGroup, callback_data: 'groups' },
+				{ text: copy.refresh, callback_data: 'status' },
+			],
+			[{ text: subscribed ? copy.pauseAlerts : copy.resumeAlerts, callback_data: subscribed ? 'pause' : 'resume' }],
+		],
+	};
+}
+
+const groups = Array.from({ length: 12 }, (_, index) => String(index + 1));
+
+export function groupMenu(language: Language, group: string) {
+	return {
+		inline_keyboard: [
+			...Array.from({ length: 4 }, (_, row) =>
+				groups
+					.slice(row * 3, row * 3 + 3)
+					.map((value) => ({ text: value === group ? `✓ ${value}` : value, callback_data: `group:${value}` })),
+			),
+			[{ text: messages[language].backButton, callback_data: 'status' }],
+		],
+	};
+}
+
+export function selectedGroup(data: string | undefined) {
+	const group = data?.startsWith('group:') ? data.slice(6) : undefined;
+	return group && groups.includes(group) ? group : undefined;
 }
 
 export function menu(language: Language, subscribed: boolean) {
