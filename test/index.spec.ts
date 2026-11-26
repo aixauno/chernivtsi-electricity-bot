@@ -435,6 +435,21 @@ describe('schedule cards and reminders', () => {
 	it('shows the next change to expected power', () => {
 		const today = currentSchedule(result, now, '10', 'en');
 		expect(today).toContain('<b>NEXT</b> · <b>16:00</b> · Power expected');
+		expect(today).toContain('<b>14:00–16:00</b>');
+	});
+
+	it('hides completed outages from Today and keeps future outages', () => {
+		const endOfOutage = new Date('2026-11-26T16:00:00+02:00');
+		const today = currentSchedule(result, endOfOutage, '10', 'en');
+		expect(today).not.toContain('14:00–16:00');
+		expect(today).toContain('<b>18:00–19:00</b>');
+		expect(notification(result, endOfOutage, '10', 'en').message).toContain('<b>14:00–16:00</b>');
+
+		const evening = new Date('2026-11-26T21:35:00+02:00');
+		expect(currentSchedule(result, evening, '10', 'en')).toContain('No more outages scheduled for today.');
+		const ukrainian = currentSchedule(result, evening, '10', 'uk');
+		expect(ukrainian).toContain('На сьогодні більше відключень не заплановано.');
+		expect(ukrainian).not.toContain('18:00–19:00');
 	});
 
 	it('sends a clear 15-minute return reminder once and honors preferences', () => {
