@@ -1,188 +1,166 @@
-import { messages, type Language } from "./messages";
+import { defaultAlerts, formatMessage, messages, type AlertPreferences, type Language } from './messages';
+import { kyiv, readEnergyUa, scheduleDate, type Day, type Schedule } from './energy-ua';
+import { readMirror } from './schedule-backup';
 
-import { fetchPage, kyiv, readWebsite, scheduleDates, type Day, type Schedule } from "./official";
+type ScheduleSource = 'energy-ua' | 'mirror';
+export type Snapshot = { schedule: Schedule; warning?: string; observed?: Partial<Record<ScheduleSource, Day>> };
+export type VerifiedSchedule = {
+	schedule: Schedule;
+	source?: ScheduleSource;
+};
 
-export { source, type Schedule } from "./official";
-export const officialChannel = "https://t.me/s/oe_cv_ua";
-export const scheduleMirror = "https://miyinvertor.com.ua/grafik/chernivtsi";
-export const energyUaGroups = "https://chernivtsi.energy-ua.info/grupa/";
-
-export type Snapshot = { schedule: Schedule; status: string; warning?: string };
-
-export class PublishedSchedule extends Error {
-	constructor(readonly url: string, cause: unknown) {
-		super("The official channel published a schedule without verifiable time slots.", { cause });
-	}
-}
-
-export async function loadSchedule(group: string, now: Date, collected?: Schedule): Promise<Schedule> {
-	const [date, next] = scheduleDates(now);
-	const energyUa = await fetchPage(energyUaGroups + group)
-		.then((html) => readEnergyUa(html, group, date)).catch(() => undefined);
-	if (energyUa) return { today: energyUa };
-	if (collected) return collected;
+export async function loadSchedule(
+	group: string,
+	now: Date,
+	readInBrowser?: (date: string) => Promise<Schedule | undefined>,
+): Promise<VerifiedSchedule> {
+	const date = scheduleDate(now);
 	try {
-		return await readWebsite(group, date, next);
+		return { schedule: await readEnergyUa(group, date), source: 'energy-ua' };
 	} catch (error) {
-		const channel = await fetchPage(officialChannel).catch(() => "");
-		const today = readAnnouncement(channel, date);
-		const mirror = today && !today.day
-			? await fetchPage(scheduleMirror).then((html) => readMirror(html, group, date)).catch(() => undefined)
-			: undefined;
-		const day = today?.day ?? mirror;
-		if (day) return { today: day, tomorrow: readAnnouncement(channel, next)?.day };
-		if (today) throw new PublishedSchedule(today.url, error);
-		throw error;
-	}
-}
-
-function pageText(html: string): string {
-	return html.replace(/<!--[\s\S]*?-->|<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, " ")
-		.replace(/<[^>]*>|&nbsp;|&#160;/gi, " ").replace(/&ndash;|&#8211;/gi, "–").replace(/\s+/g, " ");
-}
-
-function readEnergyUa(html: string, group: string, date: string): Day | undefined {
-	const text = pageText(html);
-	const groupId = /Ваша черга\s+(\d+)\b/u.exec(text)?.[1];
-	const section = /Періоди відключень на сьогодні\s+([\s\S]*?)Графік на дату\s+(\d{2}\.\d{2}\.\d{4})/u.exec(text);
-	if (groupId !== group || section?.[2].split(".").reverse().join("-") !== date) return;
-	let slots = "";
-	for (const [, hourStart, minuteStart, hourEnd, minuteEnd, label] of section[1].matchAll(
-		/(\d{2}):(00|30)\s*[–-]\s*(\d{2}):(00|30)\s+(Є світло|Немає світла)(?=\s|$)/gu,
-	)) {
-		const start = Number(hourStart) * 2 + Number(minuteStart) / 30;
-		const end = Number(hourEnd) * 2 + Number(minuteEnd) / 30;
-		if (start !== slots.length || end <= start || end > 48) return;
-		slots += (label === "Є світло" ? "1" : "0").repeat(end - start);
-	}
-	if (slots.length === 48) return { date, slots };
-}
-
-function readMirror(html: string, group: string, date: string): Day | undefined {
-	const text = pageText(html);
-	const dayLabel = new Intl.DateTimeFormat("uk-UA", { day: "numeric", month: "long", timeZone: "UTC" })
-		.format(new Date(date));
-	if (!text.includes("Оновлено " + dayLabel + " о ") || !/Джерело:\s*сайт Чернівціобленерго/u.test(text)) return;
-	const rows = [...text.matchAll(/Черга (\d+)\s+([\s\S]*?)(?=Черга \d+\s|$)/gu)];
-	const row = rows.find(([, id, body]) => id === group && body.includes("Сьогодні, " + dayLabel + " "))?.[2];
-	const today = row?.split(/\s+Завтра(?:\s|$)/u)[0];
-	const intervals = /Без світла:\s*(.*?)\s*$/u.exec(today ?? "")?.[1];
-	if (!intervals) return;
-	const [outages, uncertain, ...extra] = intervals.split(/\s*·\s*можливо\s+/u);
-	if (extra.length) return;
-	const slots = Array<string>(48).fill("1");
-	for (const [list, status] of [[outages, "0"], [uncertain, "3"]]) {
-		if (list === undefined) continue;
-		for (const interval of list.split(/\s*,\s*/)) {
-			const range = /^(\d{2}):(00|30)\s*–\s*(\d{2}):(00|30)$/.exec(interval);
-			if (!range) return;
-			const start = Number(range[1]) * 2 + Number(range[2]) / 30;
-			const end = Number(range[3]) * 2 + Number(range[4]) / 30;
-			if (start >= end || end > 48 || slots.slice(start, end).some((slot) => slot !== "1")) return;
-			slots.fill(status, start, end);
+		try {
+			const schedule = await readInBrowser?.(date);
+			if (schedule) return { schedule, source: 'energy-ua' };
+		} catch (browserError) {
+			console.warn('Energy UA Browser Run failed', browserError instanceof Error ? browserError.message : browserError);
 		}
-	}
-	return { date, slots: slots.join("") };
-}
-
-function readAnnouncement(html: string, date: string): { url: string; day?: Day } | undefined {
-	const dated = date.split("-").reverse().join(".");
-	const posts = [...html.matchAll(/data-post="oe_cv_ua\/(\d+)"[^>]*>([\s\S]*?)(?=data-post="|$)/gi)];
-	for (const [, id, body] of posts.sort((a, b) => Number(b[1]) - Number(a[1]))) {
-		const markup = /<div\b[^>]*class="[^"]*\btgme_widget_message_text\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i.exec(body)?.[1];
-		const firstLines = markup?.split(/<br\s*\/?>/i).slice(0, 2)
-			.map((line) => line.replace(/<[^>]*>/g, "").replace(/&#33;|&#x21;/gi, "!").replace(/&nbsp;/gi, " ").trim());
-		if (!firstLines?.[0].includes(dated)) continue;
-		const explicit = firstLines[0].replace(/^✨\s*/, "").toLowerCase() === "на " + dated
-			&& /^електропостачання без обмежень для всіх груп споживачів[.!]?$/iu.test(firstLines[1] ?? "");
-		const published = /^⚡\uFE0F?\s*орієнтовний графік заживлення\s/iu.test(firstLines[0]);
-		if (explicit || published) {
-			return { url: "https://t.me/oe_cv_ua/" + id, day: explicit ? { date, slots: "1".repeat(48) } : undefined };
+		try {
+			return { schedule: await readMirror(group, date), source: 'mirror' };
+		} catch (backupError) {
+			console.warn('Schedule backup failed', backupError instanceof Error ? backupError.message : backupError);
+			throw error;
 		}
-		return undefined;
 	}
 }
 
 type Status = keyof typeof messages.en.status;
 
 const dateFormats = {
-	en: new Intl.DateTimeFormat("en-GB", { timeZone: "UTC", weekday: "short", day: "numeric", month: "short" }),
-	uk: new Intl.DateTimeFormat("uk-UA", { timeZone: "UTC", weekday: "short", day: "numeric", month: "short" }),
+	en: new Intl.DateTimeFormat('en-GB', { timeZone: 'UTC', weekday: 'short', day: 'numeric', month: 'short' }),
+	uk: new Intl.DateTimeFormat('uk-UA', { timeZone: 'UTC', weekday: 'short', day: 'numeric', month: 'short' }),
 };
 
 function time(slot: number): string {
-	const hour = String(Math.floor(slot / 2)).padStart(2, "0");
-	return hour + (slot % 2 === 0 ? ":00" : ":30");
+	const hour = String(Math.floor(slot / 2)).padStart(2, '0');
+	return hour + (slot % 2 === 0 ? ':00' : ':30');
 }
 
 function describe(day: Day, language: Language): string {
 	const copy = messages[language];
-	const intervals: string[] = [];
+	const intervals = outageIntervals(day).map(
+		({ start, end, status }) => `${status === '0' ? '−' : '~'} <b>${time(start)}–${time(end)}</b> · ${copy.status[status]}`,
+	);
+	const date = dateFormats[language].format(new Date(day.date)).replace(',', '');
+	return `<b>${date.toUpperCase()}</b> · <i>${copy.localTime}</i>\n${intervals.join('\n') || copy.noOutages}`;
+}
+
+function clockMinute(now: Date): number {
+	const [, clock] = kyiv.format(now).split(' ');
+	const [hours, minutes] = clock.split(':').map(Number);
+	return hours * 60 + minutes;
+}
+
+export function currentSchedule(result: VerifiedSchedule, now: Date, group: string, language: Language): string {
+	const copy = messages[language];
+	const day = result.schedule.today;
+	const { slots } = day;
+	const start = Math.floor(clockMinute(now) / 30);
+	const status = slots[start] as Status;
+	let next = start + 1;
+	while (next < slots.length && slots[next] === status) next++;
+	const summary = [`<b>${copy.nowShort}</b> · ${copy.status[status]}`];
+	if (next < slots.length) summary.push(`<b>${copy.nextShort}</b> · <b>${time(next)}</b> · ${copy.nextStatus[slots[next] as Status]}`);
+	return formatMessage(group, language, summary.join('\n'), describe(day, language));
+}
+
+type Interval = { start: number; end: number; status: '0' | '3' };
+
+function outageIntervals(day: Day): Interval[] {
+	const intervals: Interval[] = [];
 	for (let start = 0; start < day.slots.length;) {
-		const status = day.slots[start] as Status;
+		const status = day.slots[start];
 		let end = start + 1;
 		while (day.slots[end] === status) end++;
-		if (status !== "1") {
-			const marker = status === "0" ? "−" : "~";
-			intervals.push(`${marker} <b>${time(start)}–${time(end)}</b> · ${copy.status[status]}`);
-		}
+		if (status === '0' || status === '3') intervals.push({ start, end, status });
 		start = end;
 	}
-	const date = dateFormats[language].format(new Date(day.date)).replace(",", "");
-	return `<b>${date.toUpperCase()}</b> · <i>${copy.localTime}</i>\n${intervals.join("\n") || copy.noOutages}`;
+	return intervals;
 }
 
-function currentPeriod(schedule: Schedule, now: Date) {
-	const [, clock] = kyiv.format(now).split(" ");
-	const [hours, minutes] = clock.split(":").map(Number);
-	const minute = hours * 60 + minutes;
-	const slot = Math.floor(minute / 30);
-	const slots = schedule.today.slots + (schedule.tomorrow?.slots ?? "");
-	const status = slots[slot] as Status;
-	let end = slot + 1;
-	while (slots[end] === status) end++;
-	const date = end < 48 ? schedule.today.date : schedule.tomorrow?.date;
-	const next = end < slots.length && date
-		? { date, time: time(end % 48), status: slots[end] as Status, minutes: end * 30 - minute }
-		: undefined;
-	return { status, next };
-}
-
-export function currentSchedule(schedule: Schedule, now: Date, group: string, language: Language): string {
+function describeChanges(before: Day, after: Day, language: Language): string {
 	const copy = messages[language];
-	const { status, next } = currentPeriod(schedule, now);
-	const lines = [`<b>${copy.title(group)}</b>`, "", `<b>${copy.nowShort}</b> · ${copy.status[status]}`];
-	if (next) {
-		const when = next.date === schedule.today.date ? next.time : next.date + " · " + next.time;
-		lines.push(`<b>${copy.nextShort}</b> · ${when} · ${copy.nextStatus[next.status]}`);
-	}
-	lines.push("", describe(schedule.today, language));
-	if (schedule.tomorrow) lines.push("", describe(schedule.tomorrow, language));
-	return lines.join("\n");
-}
-
-export function notification(schedule: Schedule, now: Date, group: string, language: Language, previous?: Snapshot) {
-	const copy = messages[language];
-	const { status, next } = currentPeriod(schedule, now);
-	const warningTime = next && next.minutes <= 15 ? next.date + " " + next.time + " · " : undefined;
-	const warning = warningTime && next ? warningTime + next.status : undefined;
-	const oldDays = [previous?.schedule.today, previous?.schedule.tomorrow];
-	const changed = [schedule.today, schedule.tomorrow].filter((day): day is Day =>
-		day !== undefined && oldDays.find((old) => old?.date === day.date)?.slots !== day.slots,
-	);
+	const oldIntervals = outageIntervals(before);
+	const newIntervals = outageIntervals(after);
+	const overlaps = (first: Interval, second: Interval) =>
+		first.status === second.status && first.start < second.end && second.start < first.end;
+	const range = ({ start, end }: Interval) => `<b>${time(start)}–${time(end)}</b>`;
+	const matched = new Set<Interval>();
 	const lines: string[] = [];
-	if (!previous) lines.push(copy.initial);
-	else if (changed.length) lines.push(copy.updated);
-	if (!previous || previous.status !== status) lines.push("<b>" + copy.now + "</b>\n" + copy.status[status]);
-	const legacyLabels = { "0": "🔴 Corte previsto", "1": "🟢 Suministro previsto", "3": "🟡 Suministro incierto" };
-	if (next && warningTime && previous?.warning !== warning && previous?.warning !== warningTime + legacyLabels[next.status]) {
-		lines.push(`${copy.next} · <b>${next.time}</b>\n${copy.status[next.status]}`);
+	for (const old of oldIntervals) {
+		const candidates = newIntervals.filter((interval) => overlaps(old, interval));
+		const [candidate] = candidates;
+		if (candidate && candidates.length === 1 && oldIntervals.filter((interval) => overlaps(candidate, interval)).length === 1) {
+			matched.add(candidate);
+			if (old.start !== candidate.start || old.end !== candidate.end) {
+				lines.push(copy.moved(copy.outageLabels[old.status], range(old), range(candidate)));
+			}
+		} else {
+			lines.push(copy.removed(copy.outageLabels[old.status], range(old)));
+		}
 	}
-	for (const day of changed) lines.push(describe(day, language));
+	for (const interval of newIntervals) {
+		if (!matched.has(interval)) lines.push(copy.added(copy.outageLabels[interval.status], range(interval)));
+	}
+	const date = dateFormats[language].format(new Date(after.date)).replace(',', '');
+	return `<b>${date.toUpperCase()}</b>\n${lines.join('\n')}`;
+}
 
+export function notification(
+	result: VerifiedSchedule,
+	now: Date,
+	group: string,
+	language: Language,
+	previous?: Snapshot,
+	preferences: AlertPreferences = defaultAlerts,
+) {
+	const copy = messages[language];
+	const lines: string[] = [];
+	const old = previous?.schedule.today;
+	const source = result.source;
+	const previousObservation = source && previous?.observed?.[source];
+	const reported = result.schedule.today;
+	// A source that still shows its previous schedule provides no evidence of a new revision.
+	const schedule =
+		previous && old?.date === reported.date && previousObservation?.date === reported.date && previousObservation.slots === reported.slots
+			? previous.schedule
+			: result.schedule;
+	const day = schedule.today;
+	if (preferences.updates && (old?.date !== day.date || old.slots !== day.slots)) {
+		const sameDay = old?.date === day.date;
+		lines.push(sameDay ? copy.updated : copy.initial, sameDay ? describeChanges(old, day, language) : describe(day, language));
+	}
+
+	const minute = clockMinute(now);
+	const slot = Math.floor(minute / 30);
+	const slots = day.slots;
+	let next = slot + 1;
+	while (next < slots.length && (slots[next] === slots[next - 1] || slots[next] === '3')) next++;
+	const status = slots[next];
+	const minutes = next * 30 - minute;
+	let warning: string | undefined;
+	if ((status === '0' || status === '1') && minutes <= preferences.minutes) {
+		const clock = time(next);
+		const key = day.date + ' ' + clock + ' · ';
+		warning = previous?.warning;
+		const enabled = status === '1' ? preferences.return : preferences.cutoff;
+		const legacyLabels = { '0': '🔴 Corte previsto', '1': '🟢 Suministro previsto' };
+		if (enabled && warning !== key + status && warning !== key + legacyLabels[status]) {
+			lines.push(`<b>${copy.events[status]} · ${clock}</b>\n${copy.inMinutes(minutes)} · ${copy.reminderTime}`);
+			warning = key + status;
+		}
+	}
 	return {
-		snapshot: { schedule, status, warning } satisfies Snapshot,
-		message: lines.length ? [`⚡ <b>${copy.title(group)}</b>`, ...lines, ...(changed.length ? [] : [`<i>${copy.localTime}</i>`])].join("\n\n") : undefined,
+		snapshot: { schedule, warning, ...(source && { observed: { ...previous?.observed, [source]: reported } }) } satisfies Snapshot,
+		message: lines.length ? formatMessage(group, language, ...lines) : undefined,
 	};
 }
-

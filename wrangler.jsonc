@@ -9,8 +9,9 @@
 	"upload_source_maps": true,
 	"triggers": { "crons": ["* * * * *"] },
 	"vars": { "OUTAGE_GROUP": "10" },
+	"browser": { "binding": "BROWSER" },
 	"durable_objects": {
-		"bindings": [{ "name": "MONITOR", "class_name": "ElectricityMonitor" }]
+		"bindings": [{ "name": "MONITOR", "class_name": "ElectricityMonitor" }],
 	},
-	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["ElectricityMonitor"] }]
+	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["ElectricityMonitor"] }],
 }

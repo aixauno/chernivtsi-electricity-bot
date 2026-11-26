@@ -1,28 +1,28 @@
-import { readWebsite, scheduleDates, type CollectedSchedule } from "./src/official.ts";
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+import { chromium } from 'playwright-core';
+import { energyUaGroups, parseEnergyUa, scheduleDate } from './src/energy-ua.ts';
 
-const { SCHEDULE_COLLECTOR_TOKEN: token, SCHEDULE_COLLECTOR_URL: url, OUTAGE_GROUP: group = "10" } = process.env;
-if (!token || !url || new URL(url).protocol !== "https:" || !/^(?:[1-9]|1[0-2])$/.test(group)) {
-	throw new Error("Configure SCHEDULE_COLLECTOR_TOKEN, an HTTPS SCHEDULE_COLLECTOR_URL, and a valid OUTAGE_GROUP.");
-}
+const { OUTAGE_GROUP: group = '10' } = process.env;
+if (!/^(?:[1-9]|1[0-2])$/.test(group)) throw new Error('Configure a valid OUTAGE_GROUP.');
 
-const interval = 60_000;
-while (true) {
-	const now = new Date();
-	try {
-		const [today, tomorrow] = scheduleDates(now);
-		const schedule = await readWebsite(group, today, tomorrow);
-		const collection: CollectedSchedule = { group, fetchedAt: now.getTime(), schedule };
-		const response = await fetch(url, {
-			method: "POST",
-			headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
-			body: JSON.stringify(collection),
-			redirect: "manual",
-			signal: AbortSignal.timeout(10_000),
+const url = energyUaGroups + group;
+const browser = await chromium.launchPersistentContext(join(homedir(), '.energy-ua-collector', 'chrome'), {
+	channel: 'chrome',
+	headless: false,
+});
+const page = browser.pages()[0] ?? (await browser.newPage());
+try {
+	console.log('Energy UA check opened Chrome.');
+	await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+	await page
+		.waitForFunction(() => document.body?.textContent?.includes('Графік на дату'), undefined, { timeout: 45_000 })
+		.catch(() => {
+			throw new Error('Energy UA did not show the schedule page.');
 		});
-		if (!response.ok) throw new Error("Worker returned HTTP " + response.status);
-		console.log(now.toISOString(), "Official schedule verified and delivered.");
-	} catch (error) {
-		console.error(now.toISOString(), error instanceof Error ? error.message : "Schedule collection failed.");
-	}
-	await new Promise((resolve) => setTimeout(resolve, Math.max(1_000, interval - (Date.now() - now.getTime()))));
+	if (page.url() !== url) throw new Error('Energy UA did not return the expected group page.');
+	const schedule = parseEnergyUa(await page.content(), group, scheduleDate(new Date()));
+	console.log('Energy UA schedule verified for group %s on %s.', group, schedule.today.date);
+} finally {
+	await browser.close();
 }
