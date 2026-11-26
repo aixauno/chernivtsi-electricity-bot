@@ -1,0 +1,16 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "chernivtsi-electricity-bot",
+	"main": "src/index.ts",
+	"workers_dev": true,
+	"preview_urls": false,
+	"compatibility_date": "2026-11-23",
+	"observability": { "enabled": true },
+	"upload_source_maps": true,
+	"triggers": { "crons": ["* * * * *"] },
+	"vars": { "OUTAGE_GROUP": "10" },
+	"durable_objects": {
+		"bindings": [{ "name": "MONITOR", "class_name": "ElectricityMonitor" }]
+	},
+	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["ElectricityMonitor"] }]
+}
