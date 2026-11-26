@@ -27,7 +27,7 @@ try {
             $settings = @{
                 url = $webhookUrl
                 secret_token = $secret
-                allowed_updates = @('message')
+                allowed_updates = @('message', 'callback_query')
                 max_connections = 1
             } | ConvertTo-Json -Compress
             $registered = Invoke-RestMethod -Method Post -Uri "https://api.telegram.org/bot$token/setWebhook" -ContentType 'application/json' -Body $settings -TimeoutSec 15

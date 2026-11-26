@@ -3,7 +3,7 @@ import { kyiv, readEnergyUa, scheduleDate, type Day, type Schedule } from './ene
 import { readMirror } from './schedule-backup';
 
 type ScheduleSource = 'energy-ua' | 'mirror';
-export type Snapshot = { schedule: Schedule; warning?: string; observed?: Partial<Record<ScheduleSource, Day>> };
+export type Snapshot = { schedule: Schedule; warning?: string; warnings?: string[]; observed?: Partial<Record<ScheduleSource, Day>> };
 export type VerifiedSchedule = {
 	schedule: Schedule;
 	source?: ScheduleSource;
@@ -13,6 +13,7 @@ export async function loadSchedule(
 	group: string,
 	now: Date,
 	readInBrowser?: (date: string) => Promise<Schedule | undefined>,
+	readBackupPage?: () => Promise<string>,
 ): Promise<VerifiedSchedule> {
 	const date = scheduleDate(now);
 	try {
@@ -25,7 +26,7 @@ export async function loadSchedule(
 			console.warn('Energy UA Browser Run failed', browserError instanceof Error ? browserError.message : browserError);
 		}
 		try {
-			return { schedule: await readMirror(group, date), source: 'mirror' };
+			return { schedule: await readMirror(group, date, readBackupPage), source: 'mirror' };
 		} catch (backupError) {
 			console.warn('Schedule backup failed', backupError instanceof Error ? backupError.message : backupError);
 			throw error;
@@ -45,15 +46,22 @@ function time(slot: number): string {
 	return hour + (slot % 2 === 0 ? ':00' : ':30');
 }
 
-function describe(day: Day, language: Language, currentSlot = 0): string {
+function displayDate(date: string, language: Language): string {
+	return dateFormats[language].format(new Date(date)).replace(',', '').toUpperCase();
+}
+
+function describeDay(day: Day, language: Language, currentSlot: number): string {
 	const copy = messages[language];
 	const scheduled = outageIntervals(day);
-	const intervals = scheduled
-		.filter(({ end }) => end > currentSlot)
-		.map(({ start, end, status }) => `${status === '0' ? '−' : '~'} <b>${time(start)}–${time(end)}</b> · ${copy.status[status]}`);
-	const date = dateFormats[language].format(new Date(day.date)).replace(',', '');
-	const empty = scheduled.length ? copy.noRemainingOutages : copy.noOutages;
-	return `<b>${date.toUpperCase()}</b> · <i>${copy.localTime}</i>\n${intervals.join('\n') || empty}`;
+	const intervals = scheduled.filter(({ end }) => end > currentSlot);
+	return (
+		intervals
+			.map(
+				({ start, end, status }, index) =>
+					`${index === intervals.length - 1 ? '╰' : '╌'} <b>${time(start)}–${time(end)}</b>${status === '3' ? ` · <i>${copy.outageLabels[status]}</i>` : ''}`,
+			)
+			.join('\n') || (scheduled.length ? copy.noRemainingOutages : copy.noOutages)
+	);
 }
 
 function clockMinute(now: Date): number {
@@ -62,17 +70,54 @@ function clockMinute(now: Date): number {
 	return hours * 60 + minutes;
 }
 
-export function currentSchedule(result: VerifiedSchedule, now: Date, group: string, language: Language): string {
+type CardDetails = { checkedAt?: number; previous?: Schedule; stale?: Schedule; notices?: string[]; showFullDay?: boolean };
+
+export function currentSchedule(
+	result: VerifiedSchedule | undefined,
+	now: Date,
+	group: string,
+	language: Language,
+	details: CardDetails = {},
+): string {
 	const copy = messages[language];
-	const day = result.schedule.today;
-	const { slots } = day;
-	const start = Math.floor(clockMinute(now) / 30);
-	const status = slots[start] as Status;
-	let next = start + 1;
-	while (next < slots.length && slots[next] === status) next++;
-	const summary = [`<b>${copy.nowShort}</b> · ${copy.status[status]}`];
-	if (next < slots.length) summary.push(`<b>${copy.nextShort}</b> · <b>${time(next)}</b> · ${copy.nextStatus[slots[next] as Status]}`);
-	return formatMessage(group, language, summary.join('\n'), describe(day, language, start));
+	const date = scheduleDate(now);
+	const schedule = result?.schedule ?? details.stale;
+	const today = schedule?.today.date === date ? schedule.today : undefined;
+	const minute = clockMinute(now);
+	const start = Math.floor(minute / 30);
+	const summary = [`<b>${copy.nowShort}</b> · ${result && today ? copy.status[today.slots[start] as Status] : copy.unknownStatus}`];
+	if (result && today) {
+		const slots = today.slots;
+		let next = start + 1;
+		while (next < slots.length && slots[next] === slots[start]) next++;
+		if (next < slots.length) {
+			const countdown =
+				slots[next] === '0' && !details.notices?.length && next * 30 - minute <= defaultAlerts.minutes
+					? ` · <i>${copy.inMinutes(next * 30 - minute)}</i>`
+					: '';
+			summary.push(`<b>${copy.nextShort}</b> · <b>${time(next)}</b> · ${copy.nextStatus[slots[next] as Status]}${countdown}`);
+		}
+	} else {
+		summary.push(`<b>${copy.nextShort}</b> · ${copy.unknownTransition}`);
+	}
+	const stale = result ? '' : `<i>${copy.previousSchedule}</i>\n`;
+	const todayHeading = `<b>${copy.todayButton} · ${displayDate(date, language)}</b> · <i>${copy.localTime}</i>`;
+	const todayText = today ? stale + describeDay(today, language, result && !details.showFullDay ? start : 0) : copy.scheduleUnavailable;
+	const notes = details.notices ? [...details.notices] : [];
+	if (!result) notes.push(`✦ <b>${copy.unavailable}</b>`);
+	else if (!details.notices && today && details.previous?.today.date === date) {
+		const before = details.previous.today;
+		if (before.slots !== today.slots) notes.push(`✦ ${copy.updated}\n${describeChanges(before, today, language)}`);
+		else notes.push(`<i>${copy.noChanges}</i>`);
+	}
+	if (details.checkedAt !== undefined) {
+		const [updatedDate, updatedTime] = kyiv.format(new Date(details.checkedAt)).split(' ');
+		const priorDate = updatedDate === date ? '' : ` <b>${displayDate(updatedDate, language)}</b> ·`;
+		notes.push(`<i>${result ? copy.updatedAt : copy.lastUpdate}</i>${priorDate} <b>${updatedTime}</b>`);
+	}
+	const sections = [summary.join('\n'), `${todayHeading}\n${todayText}`];
+	if (notes.length) sections.push(notes.join('\n'));
+	return formatMessage(group, language, ...sections);
 }
 
 type Interval = { start: number; end: number; status: '0' | '3' };
@@ -95,7 +140,7 @@ function describeChanges(before: Day, after: Day, language: Language): string {
 	const newIntervals = outageIntervals(after);
 	const overlaps = (first: Interval, second: Interval) =>
 		first.status === second.status && first.start < second.end && second.start < first.end;
-	const range = ({ start, end }: Interval) => `<b>${time(start)}–${time(end)}</b>`;
+	const range = ({ start, end }: Interval) => `<code>${time(start)}–${time(end)}</code>`;
 	const matched = new Set<Interval>();
 	const lines: string[] = [];
 	for (const old of oldIntervals) {
@@ -113,8 +158,10 @@ function describeChanges(before: Day, after: Day, language: Language): string {
 	for (const interval of newIntervals) {
 		if (!matched.has(interval)) lines.push(copy.added(copy.outageLabels[interval.status], range(interval)));
 	}
-	const date = dateFormats[language].format(new Date(after.date)).replace(',', '');
-	return `<b>${date.toUpperCase()}</b>\n${lines.join('\n')}`;
+	const visibleChanges = 5;
+	if (lines.length > visibleChanges)
+		lines.splice(visibleChanges, lines.length, `<i>${copy.moreChanges(lines.length - visibleChanges)}</i>`);
+	return lines.join('\n');
 }
 
 export function notification(
@@ -124,6 +171,7 @@ export function notification(
 	language: Language,
 	previous?: Snapshot,
 	preferences: AlertPreferences = defaultAlerts,
+	checkedAt = now.getTime(),
 ) {
 	const copy = messages[language];
 	const lines: string[] = [];
@@ -131,15 +179,18 @@ export function notification(
 	const source = result.source;
 	const previousObservation = source && previous?.observed?.[source];
 	const reported = result.schedule.today;
-	// A source that still shows its previous schedule provides no evidence of a new revision.
-	const schedule =
-		previous && old?.date === reported.date && previousObservation?.date === reported.date && previousObservation.slots === reported.slots
-			? previous.schedule
-			: result.schedule;
-	const day = schedule.today;
-	if (preferences.updates && (old?.date !== day.date || old.slots !== day.slots)) {
-		const sameDay = old?.date === day.date;
-		lines.push(sameDay ? copy.updated : copy.initial, sameDay ? describeChanges(old, day, language) : describe(day, language));
+	// A source that still shows its previous schedule for today provides no evidence of a revision for today.
+	const day =
+		old?.date === reported.date &&
+		old.slots !== reported.slots &&
+		previousObservation?.date === reported.date &&
+		previousObservation.slots === reported.slots
+			? old
+			: reported;
+	const schedule = { today: day };
+	if (preferences.updates) {
+		if (old?.date !== day.date) lines.push(`✦ ${copy.initial}`);
+		else if (old.slots !== day.slots) lines.push(`✦ ${copy.updated}\n${describeChanges(old, day, language)}`);
 	}
 
 	const minute = clockMinute(now);
@@ -149,20 +200,25 @@ export function notification(
 	while (next < slots.length && (slots[next] === slots[next - 1] || slots[next] === '3')) next++;
 	const status = slots[next];
 	const minutes = next * 30 - minute;
-	let warning: string | undefined;
+	const warnings = old?.date === day.date ? [...(previous?.warnings ?? (previous?.warning ? [previous.warning] : []))] : [];
 	if ((status === '0' || status === '1') && minutes <= preferences.minutes) {
 		const clock = time(next);
 		const key = day.date + ' ' + clock + ' · ';
-		warning = previous?.warning;
 		const enabled = status === '1' ? preferences.return : preferences.cutoff;
 		const legacyLabels = { '0': '🔴 Corte previsto', '1': '🟢 Suministro previsto' };
-		if (enabled && warning !== key + status && warning !== key + legacyLabels[status]) {
-			lines.push(`<b>${copy.events[status]} · ${clock}</b>\n${copy.inMinutes(minutes)} · ${copy.reminderTime}`);
-			warning = key + status;
+		if (enabled && !warnings.includes(key + status) && !warnings.includes(key + legacyLabels[status])) {
+			lines.push(`✦ <b>${copy.events[status]} · ${clock}</b> · <i>${copy.inMinutes(minutes)}</i>`);
+			warnings.push(key + status);
 		}
 	}
 	return {
-		snapshot: { schedule, warning, ...(source && { observed: { ...previous?.observed, [source]: reported } }) } satisfies Snapshot,
-		message: lines.length ? formatMessage(group, language, ...lines) : undefined,
+		snapshot: {
+			schedule,
+			...(warnings.length && { warnings }),
+			...(source && { observed: { ...previous?.observed, [source]: reported } }),
+		} satisfies Snapshot,
+		message: lines.length
+			? currentSchedule({ ...result, schedule }, now, group, language, { checkedAt, notices: lines, showFullDay: true })
+			: undefined,
 	};
 }

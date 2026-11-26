@@ -18,13 +18,23 @@ export function scheduleDate(now: Date): string {
 }
 
 export async function readEnergyUa(group: string, date: string): Promise<Schedule> {
-	const response = await fetch(energyUaGroups + group, {
-		signal: AbortSignal.timeout(8_000),
-		cache: 'no-store',
-		redirect: 'manual',
-	});
-	if (!response.ok) throw new Error('Energy UA returned HTTP ' + response.status);
-	return parseEnergyUa(await response.text(), group, date);
+	return parseEnergyUa(await fetchSchedulePage(energyUaGroups + group, 'Energy UA'), group, date);
+}
+
+export async function fetchSchedulePage(url: string, source: string): Promise<string> {
+	const signal = AbortSignal.timeout(8_000);
+	let response: Response;
+	try {
+		response = await fetch(url, { signal, cache: 'no-store', redirect: 'manual' });
+	} catch (error) {
+		throw new Error(source + (signal.aborted ? ' request timed out.' : ' network request failed.'), { cause: error });
+	}
+	if (!response.ok) throw new Error(source + ' returned HTTP ' + response.status);
+	try {
+		return await response.text();
+	} catch (error) {
+		throw new Error(source + (signal.aborted ? ' request timed out.' : ' response could not be read.'), { cause: error });
+	}
 }
 
 export function parseEnergyUa(html: string, group: string, date: string): Schedule {
@@ -34,8 +44,13 @@ export function parseEnergyUa(html: string, group: string, date: string): Schedu
 		const payload = /<script\b[^>]*\s+id\s*=\s*["']schedulePayload["'][^>]*>([\s\S]*?)<\/script\s*>/i.exec(
 			html.replace(/<!--[\s\S]*?-->/g, ''),
 		);
-		const today = payload ? readPayloadDay(payload[1], date) : readRenderedDay(text, date);
-		if (today) return { today };
+		if (payload) {
+			const schedule = readPayload(payload[1], date);
+			if (schedule) return schedule;
+		} else {
+			const today = readRenderedDay(text, date);
+			if (today) return { today };
+		}
 	}
 	throw new Error('Energy UA has no verified schedule for this group today.');
 }
@@ -48,17 +63,22 @@ export function pageText(html: string): string {
 		.replace(/\s+/g, ' ');
 }
 
-function readPayloadDay(json: string, date: string): Day | undefined {
-	let payload: { dates?: { today?: unknown }; today?: unknown } | null;
+function readPayload(json: string, date: string): Schedule | undefined {
+	let payload: { today?: unknown; dates?: { today?: unknown } } | null;
 	try {
 		payload = JSON.parse(json);
 	} catch {
 		return;
 	}
-	if (payload?.dates?.today !== date.split('-').reverse().join('.') || !Array.isArray(payload.today) || !payload.today.length) return;
+	const today = readPayloadDay(payload?.today, payload?.dates?.today, date);
+	if (today) return { today };
+}
+
+function readPayloadDay(periods: unknown, publishedDate: unknown, date: string): Day | undefined {
+	if (publishedDate !== date.split('-').reverse().join('.') || !Array.isArray(periods) || !periods.length) return;
 
 	const slots = Array<string>(48).fill('1');
-	for (const period of payload.today) {
+	for (const period of periods) {
 		const { from, to, status } = period ?? {};
 		if (
 			!Number.isInteger(from) ||
