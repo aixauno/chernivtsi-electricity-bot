@@ -168,7 +168,7 @@ describe('Chernivtsi electricity bot', () => {
 				body: JSON.stringify({ update_id: 31, message: { chat: { id: 123 }, text: '/status' } }),
 			});
 			expect(status.status).toBe(204);
-			expect(send.mock.lastCall?.[0].text).toContain('Outage · <b>13:30–16:00</b>\n<i>Last update</i> <b>12:39</b>');
+			expect(send.mock.lastCall?.[0].text).toContain('Outage · <b>13:30–16:00</b>\n\n<i>Last update</i> <b>12:39</b>');
 			await worker.scheduled(cron, bindings);
 			expect(send).toHaveBeenCalledTimes(1);
 			expect(fetchMock.mock.calls.filter(([url]) => url === source)).toHaveLength(3);
@@ -301,7 +301,7 @@ describe('Chernivtsi electricity bot', () => {
 			const message = send.mock.lastCall?.[0].text;
 			expect(message).toBe(
 				'<b>Schedule update · Chernivtsi · Group 10</b>\n────────────────────\n\n' +
-					'· <b>Updated</b>\n<b>23:00–23:30</b> · Power expected → Supply uncertain',
+					'· <b>Updated</b>\n\n<b>23:00–23:30</b> · Power expected → Supply uncertain',
 			);
 			expect(message).not.toContain('16:00–17:00');
 			await worker.scheduled(cron, bindings);
@@ -352,7 +352,7 @@ describe('Chernivtsi electricity bot', () => {
 			const card = currentSchedule(await loadSchedule('10', now), now, '10', 'en');
 			expect(card).toBe(
 				'<b>Today status · Chernivtsi · Group 10</b>\n────────────────────\n\n' +
-					'· <b>NOW</b>\nOutage expected · <b>13:00–16:00</b>\n· <b>NEXT</b>\n' +
+					'· <b>NOW</b>\nOutage expected · <b>13:00–16:00</b>\n\n· <b>NEXT</b>\n' +
 					'Supply uncertain · <b>16:00–16:30</b>\n' +
 					'Outage · <b>19:00–21:00</b>\n' +
 					'Supply uncertain · <b>21:00–21:30</b>',
@@ -567,7 +567,7 @@ describe('Chernivtsi electricity bot', () => {
 			await press(86, 'status');
 			expect(edits.mock.lastCall?.[0].text).toBe(
 				'<b>Today status · Chernivtsi · Group 10</b>\n────────────────────\n\n' +
-					'· <b>NOW</b>\nPower expected\n· <b>NEXT</b>\nOutage · <b>15:00–16:00</b>\n<i>Last update</i> <b>12:51</b>',
+					'· <b>NOW</b>\nPower expected\n\n· <b>NEXT</b>\nOutage · <b>15:00–16:00</b>\n\n<i>Last update</i> <b>12:51</b>',
 			);
 		} finally {
 			warn.mockRestore();
@@ -865,7 +865,7 @@ describe('Chernivtsi electricity bot', () => {
 					parse_mode: 'HTML',
 					text:
 						'<b>Стан на сьогодні · Чернівці · Група 10</b>\n────────────────────\n\n' +
-						'· <b>ЗАРАЗ</b>\nСтан невідомий\n· <b>ДАЛІ</b>\nЧас наступної зміни невідомий',
+						'· <b>ЗАРАЗ</b>\nСтан невідомий\n\n· <b>ДАЛІ</b>\nЧас наступної зміни невідомий',
 				}),
 			]);
 		} finally {
@@ -884,7 +884,7 @@ describe('schedule cards and reminders', () => {
 		const today = currentSchedule(result, now, '10', 'en');
 		expect(today).toBe(
 			'<b>Today status · Chernivtsi · Group 10</b>\n────────────────────\n\n' +
-				'· <b>NOW</b>\nOutage expected · <b>14:00–16:00</b>\n' +
+				'· <b>NOW</b>\nOutage expected · <b>14:00–16:00</b>\n\n' +
 				'· <b>NEXT</b>\nPower expected · <b>16:00</b>\nOutage · <b>18:00–19:00</b>',
 		);
 	});
@@ -897,8 +897,8 @@ describe('schedule cards and reminders', () => {
 		const today = currentSchedule(example, beforeOutage, '10', 'en', { checkedAt: beforeOutage.getTime() });
 		expect(today).toBe(
 			'<b>Today status · Chernivtsi · Group 10</b>\n────────────────────\n\n' +
-				'· <b>NOW</b>\nPower expected\n· <b>NEXT</b>\nOutage · <b>13:00–16:00</b> · <i>in 15 min</i>\n' +
-				'Supply uncertain · <b>18:30–20:00</b>\n<i>Updated at</i> <b>12:45</b>',
+				'· <b>NOW</b>\nPower expected\n\n· <b>NEXT</b>\nOutage · <b>13:00–16:00</b> · <i>in 15 min</i>\n' +
+				'Supply uncertain · <b>18:30–20:00</b>\n\n<i>Updated at</i> <b>12:45</b>',
 		);
 	});
 
@@ -908,7 +908,7 @@ describe('schedule cards and reminders', () => {
 		expect(today).not.toContain('14:00–16:00');
 		expect(today).toContain('<b>18:00–19:00</b>');
 		const stale = currentSchedule(undefined, endOfOutage, '10', 'en', { stale: result.schedule, checkedAt: now.getTime() });
-		expect(stale).toBe(today + '\n<i>Last update</i> <b>15:45</b>');
+		expect(stale).toBe(today + '\n\n<i>Last update</i> <b>15:45</b>');
 
 		const evening = new Date('2026-11-26T21:35:00+02:00');
 		expect(currentSchedule(result, evening, '10', 'en')).toContain('No more outages scheduled for today.');
@@ -991,7 +991,7 @@ describe('schedule cards and reminders', () => {
 		const previous = { today: { date: '2026-11-26', slots: '001133'.repeat(8) } };
 		const revised = { schedule: { today: { ...previous.today, slots: '130301'.repeat(8) } } };
 		const alert = notification(revised, midnight, '10', 'en', { schedule: previous }).messages[0]?.text;
-		const changes = alert?.split('· <b>Updated</b>\n')[1];
+		const changes = alert?.split('· <b>Updated</b>\n\n')[1];
 		const lines = changes?.split('\n') ?? [];
 		expect(lines.map((line) => line.split(' · ')[1])).toEqual([
 			'Outage expected → Power expected',
