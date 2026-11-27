@@ -2,11 +2,10 @@ import { defaultAlerts, formatMessage, messages, type AlertPreferences, type Lan
 import { kyiv, readEnergyUa, scheduleDate, type Day, type Schedule } from './energy-ua';
 import { readMirror } from './schedule-backup';
 
-type ScheduleSource = 'energy-ua' | 'mirror';
-export type Snapshot = { schedule: Schedule; warning?: string; warnings?: string[]; observed?: Partial<Record<ScheduleSource, Day>> };
+export type Snapshot = { schedule: Schedule; warning?: string; warnings?: string[] };
 export type VerifiedSchedule = {
 	schedule: Schedule;
-	source?: ScheduleSource;
+	source?: 'energy-ua' | 'mirror';
 };
 
 export async function loadSchedule(
@@ -120,6 +119,28 @@ function describeUpdate(before: Day, after: Day, language: Language, currentSlot
 	return Array.from(changes, ([transition, ranges]) => `${ranges.join(', ')} · ${transition}`);
 }
 
+const legacyReminderLabels = { '0': '🔴 Corte previsto', '1': '🟢 Suministro previsto' };
+
+function reminderStatus(slots: string, slot: number) {
+	const status = slots[slot];
+	if ((status === '0' || status === '1') && status !== slots[slot - 1]) return status;
+}
+
+function reminderKey(day: Day, slot: number): string {
+	return day.date + ' ' + time(slot) + ' · ';
+}
+
+function retainWarnings(day: Day, warnings: string[]): string[] {
+	const retained: string[] = [];
+	for (let slot = 1; slot < day.slots.length; slot++) {
+		const status = reminderStatus(day.slots, slot);
+		if (!status) continue;
+		const key = reminderKey(day, slot);
+		if (warnings.includes(key + status) || warnings.includes(key + legacyReminderLabels[status])) retained.push(key + status);
+	}
+	return retained;
+}
+
 export function notification(
 	result: VerifiedSchedule,
 	now: Date,
@@ -131,45 +152,38 @@ export function notification(
 	const copy = messages[language];
 	const messagesToSend: { text: string; snapshot: Snapshot }[] = [];
 	const old = previous?.schedule.today;
-	const source = result.source;
-	const previousBackup = previous?.observed?.mirror;
-	const reported = result.schedule.today;
-	// An unchanged backup must not override the latest Energy UA schedule.
-	const day =
-		source === 'mirror' && old?.date === reported.date && previousBackup?.date === reported.date && previousBackup.slots === reported.slots
-			? old
-			: reported;
-	const schedule = { today: day };
+	const { schedule } = result;
+	const day = schedule.today;
+	const sameDay = old?.date === day.date;
+	const changed = sameDay && old.slots !== day.slots;
+	const sent = sameDay ? (previous?.warnings ?? (previous?.warning ? [previous.warning] : [])) : [];
+	const warnings = changed && sent.length ? retainWarnings(day, sent) : sent;
 	const minute = clockMinute(now);
 	const slot = Math.floor(minute / 30);
-	const slots = day.slots;
-	let next = slot + 1;
-	while (next < slots.length && (slots[next] === slots[next - 1] || slots[next] === '3')) next++;
-	const status = slots[next];
-	const minutes = next * 30 - minute;
-	const warnings = old?.date === day.date ? [...(previous?.warnings ?? (previous?.warning ? [previous.warning] : []))] : [];
 	let snapshot: Snapshot = {
 		schedule,
 		...(warnings.length > 0 && { warnings }),
-		...(source && { observed: { ...previous?.observed, [source]: reported } }),
 	};
-	if (preferences.updates) {
-		const changes = old?.date === day.date ? describeUpdate(old, day, language, slot) : [`· <b>${copy.initial}</b>`];
-		if (old?.date === day.date && changes.length) changes.unshift(`· <b>${copy.updated}</b>`);
-		if (changes.length) {
-			messagesToSend.push({ text: formatMessage(group, language, changes.join('\n'), copy.updateTitle), snapshot });
+	if (preferences.updates && (!sameDay || changed)) {
+		const changes = sameDay ? describeUpdate(old, day, language, slot) : [];
+		if (!sameDay || changes.length) {
+			const heading = sameDay ? copy.updated : copy.initial;
+			const body = [`· <b>${heading}</b>`, ...changes].join('\n');
+			messagesToSend.push({ text: formatMessage(group, language, body, copy.updateTitle), snapshot });
 		}
 	}
-	if ((status === '0' || status === '1') && minutes <= preferences.minutes) {
-		const clock = time(next);
-		const key = day.date + ' ' + clock + ' · ';
+	for (let next = slot + 1; next < day.slots.length && next * 30 - minute <= preferences.minutes; next++) {
+		const status = reminderStatus(day.slots, next);
+		if (!status) continue;
+		const key = reminderKey(day, next);
 		const enabled = status === '1' ? preferences.return : preferences.cutoff;
-		const legacyLabels = { '0': '🔴 Corte previsto', '1': '🟢 Suministro previsto' };
-		if (enabled && !warnings.includes(key + status) && !warnings.includes(key + legacyLabels[status])) {
-			const body = `· <b>${clock}</b> · ${copy.events[status]} · <i>${copy.inMinutes(minutes)}</i>`;
+		if (enabled && !warnings.includes(key + status) && !warnings.includes(key + legacyReminderLabels[status])) {
+			const minutes = next * 30 - minute;
+			const body = `· <b>${time(next)}</b> · ${copy.events[status]} · <i>${copy.inMinutes(minutes)}</i>`;
 			snapshot = { ...snapshot, warnings: [...warnings, key + status] };
 			messagesToSend.push({ text: formatMessage(group, language, body, copy.reminderTitles[status]), snapshot });
 		}
+		break;
 	}
 	return { snapshot, messages: messagesToSend };
 }

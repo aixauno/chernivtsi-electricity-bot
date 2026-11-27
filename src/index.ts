@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { scheduleDate } from './energy-ua';
+import { scheduleDate, type Day } from './energy-ua';
 import { readBrowserSchedule } from './energy-ua-browser';
 import {
 	alertMenu,
@@ -31,7 +31,7 @@ const pollingOffsetLifetimeMs = 24 * 60 * 60_000;
 
 type PollingOffset = { offset: number; updatedAt: number };
 
-type SuccessfulCheck = { checkedAt: number; result: VerifiedSchedule };
+type SuccessfulCheck = { checkedAt: number; result: VerifiedSchedule; observedBackup?: Day; retainedAt?: number };
 type ScheduleCheck = { date: string } & (SuccessfulCheck | { checkedAt: number; error: string; lastSuccess?: SuccessfulCheck });
 
 async function subscribers(storage: Pick<DurableObjectStorage, 'get'>, owner: string): Promise<string[]> {
@@ -51,7 +51,7 @@ async function setAlerts(storage: DurableObjectStorage, owner: string, chatId: s
 
 export class ElectricityMonitor extends DurableObject<BotEnv> {
 	private running?: Promise<void>;
-	private readonly scheduleRefreshes = new Map<string, Promise<ScheduleCheck>>();
+	private scheduleRefresh?: Promise<ScheduleCheck>;
 	private readonly updatesInFlight = new Map<number, Promise<void>>();
 	private readonly chatOperations = new Map<string, Promise<void>>();
 
@@ -143,7 +143,8 @@ export class ElectricityMonitor extends DurableObject<BotEnv> {
 		}
 	}
 
-	private async getSchedule(group: string): Promise<{ check: ScheduleCheck; now: Date }> {
+	private async getSchedule(): Promise<{ check: ScheduleCheck; now: Date }> {
+		const group = this.env.OUTAGE_GROUP;
 		const key = 'schedule:checked:' + group;
 		let check = await this.ctx.storage.get<ScheduleCheck>(key);
 		let refreshed = false;
@@ -151,22 +152,42 @@ export class ElectricityMonitor extends DurableObject<BotEnv> {
 			const now = new Date();
 			const date = scheduleDate(now);
 			if (check?.date === date && (refreshed || now.getTime() - check.checkedAt < scheduleCheckIntervalMs)) return { check, now };
-			let pending = this.scheduleRefreshes.get(group);
-			if (!pending) {
-				pending = this.refreshSchedule(key, group, now, date, check).finally(() => this.scheduleRefreshes.delete(group));
-				this.scheduleRefreshes.set(group, pending);
-			}
-			check = await pending;
+			this.scheduleRefresh ??= this.refreshSchedule(key, group, now, date, check).finally(() => {
+				this.scheduleRefresh = undefined;
+			});
+			check = await this.scheduleRefresh;
 			refreshed = true;
 		}
 	}
 
 	private async refreshSchedule(key: string, group: string, now: Date, date: string, previous?: ScheduleCheck): Promise<ScheduleCheck> {
 		const checkedAt = now.getTime();
-		const lastSuccess =
-			previous && ('result' in previous ? { checkedAt: previous.checkedAt, result: previous.result } : previous.lastSuccess);
+		const lastSuccess = previous && ('result' in previous ? previous : previous.lastSuccess);
 		const check = await loadSchedule(group, now, (day) => readBrowserSchedule(this.env.BROWSER, this.ctx.storage, group, day, now)).then(
-			(result): ScheduleCheck => ({ date, checkedAt, result }),
+			(result): ScheduleCheck => {
+				const lastDay = lastSuccess?.result.schedule.today;
+				const observedBackup = lastSuccess?.observedBackup ?? (lastSuccess?.result.source === 'mirror' ? lastDay : undefined);
+				if (result.source !== 'mirror') {
+					return { date, checkedAt, result, observedBackup: observedBackup?.date === date ? observedBackup : undefined };
+				}
+				const reported = result.schedule.today;
+				if (
+					lastSuccess &&
+					lastDay?.date === date &&
+					observedBackup?.date === date &&
+					observedBackup.slots === reported.slots &&
+					lastDay.slots !== reported.slots
+				) {
+					return {
+						date,
+						checkedAt,
+						result: lastSuccess.result,
+						observedBackup,
+						retainedAt: lastSuccess.retainedAt ?? lastSuccess.checkedAt,
+					};
+				}
+				return { date, checkedAt, result, observedBackup: reported };
+			},
 			(error: unknown): ScheduleCheck => ({ date, checkedAt, error: error instanceof Error ? error.message : String(error), lastSuccess }),
 		);
 		await this.ctx.storage.put(key, check);
@@ -184,10 +205,13 @@ export class ElectricityMonitor extends DurableObject<BotEnv> {
 
 	private async pollNotices(token: string, chatId: string, group: string) {
 		const recipients = await subscribers(this.ctx.storage, chatId);
-		const { check } = await this.getSchedule(group);
-		if ('error' in check) throw new Error(check.error);
+		const { check } = await this.getSchedule();
+		let accepted: SuccessfulCheck;
+		if ('result' in check) accepted = check;
+		else if (check.lastSuccess?.result.schedule.today.date === check.date) accepted = check.lastSuccess;
+		else throw new Error(check.error);
 		const deliveries = await Promise.allSettled(
-			recipients.map((chat) => this.forChat(chat, () => this.sendNotice(token, chatId, chat, group, check))),
+			recipients.map((chat) => this.forChat(chat, () => this.sendNotice(token, chatId, chat, group, accepted))),
 		);
 		for (const delivery of deliveries) if (delivery.status === 'rejected') throw delivery.reason;
 	}
@@ -249,13 +273,15 @@ export class ElectricityMonitor extends DurableObject<BotEnv> {
 	}
 
 	private async status(group: string, language: Language) {
-		const { check, now } = await this.getSchedule(group);
-		return 'result' in check
-			? currentSchedule(check.result, now, group, language, { checkedAt: check.checkedAt })
-			: currentSchedule(undefined, now, group, language, {
-					checkedAt: check.lastSuccess?.checkedAt,
-					stale: check.lastSuccess?.result.schedule,
-				});
+		const { check, now } = await this.getSchedule();
+		if ('result' in check && check.retainedAt === undefined) {
+			return currentSchedule(check.result, now, group, language, { checkedAt: check.checkedAt });
+		}
+		const lastSuccess = 'result' in check ? check : check.lastSuccess;
+		return currentSchedule(undefined, now, group, language, {
+			checkedAt: lastSuccess?.retainedAt ?? lastSuccess?.checkedAt,
+			stale: lastSuccess?.result.schedule,
+		});
 	}
 
 	private async replyToCallback(token: string, owner: string, group: string, callback: NonNullable<TelegramUpdate['callback_query']>) {
@@ -265,7 +291,7 @@ export class ElectricityMonitor extends DurableObject<BotEnv> {
 			return;
 		const chatId = String(message.chat.id);
 		if (chatId !== owner && message.chat.type !== 'private') return;
-		if (!data.startsWith('group:') && !['groups', 'status', 'pause', 'resume'].includes(data)) return;
+		if (!['status', 'pause', 'resume'].includes(data)) return;
 		const language = (await this.ctx.storage.get<Language>('telegram:language:' + chatId)) ?? 'en';
 		if (data === 'pause' || data === 'resume') await setAlerts(this.ctx.storage, owner, chatId, data === 'resume');
 		const status = await this.status(group, language);

@@ -122,23 +122,69 @@ describe('Chernivtsi electricity bot', () => {
 		}
 	});
 
-	it('does not send a reversion when the backup still has its already observed schedule', () => {
-		const now = new Date('2026-11-26T10:00:00+02:00');
-		const original = { today: { date: '2026-11-26', slots: '1'.repeat(48) } };
-		const revised = { today: { date: '2026-11-26', slots: '1'.repeat(26) + '0'.repeat(6) + '1'.repeat(16) } };
-		const first = notification({ schedule: original, source: 'mirror' }, now, '10', 'en');
-		const update = notification({ schedule: revised, source: 'energy-ua' }, now, '10', 'en', first.snapshot);
-		expect(update.messages[0]?.text).toContain('13:00–16:00');
-		const stale = { schedule: original, source: 'mirror' } as const;
-		expect(notification(stale, now, '10', 'en', update.snapshot).messages).toEqual([]);
-		expect(notification({ schedule: revised, source: 'mirror' }, now, '10', 'en', update.snapshot).messages).toEqual([]);
+	it('uses the revised Energy UA schedule for status and reminders when the backup is unchanged', async () => {
+		const now = new Date('2026-11-26T12:36:00+02:00');
+		const date = '2026-11-26';
+		const cron = createScheduledController({ cron: '* * * * *' });
+		const secret = await webhookSecret('test-token');
+		const send = vi.fn<(body: { text: string }) => void>();
+		let primaryAvailable = false;
+		let backupAvailable = true;
+		vi.useFakeTimers({ toFake: ['Date'] });
+		vi.setSystemTime(now);
+		await runInDurableObject(bindings.MONITOR.getByName('chernivtsi'), async (_monitor, state) => {
+			await state.storage.put('energy-ua:browser-usage', { utcDay: date, usedMs: 8 * 60_000, lastAttempt: now.getTime() });
+		});
+		const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, options) => {
+			if (url === source) {
+				return primaryAvailable
+					? energyPage(date, '00:00 – 13:30 Є світло 13:30 – 16:00 Немає світла 16:00 – 24:00 Є світло')
+					: new Response(null, { status: 503 });
+			}
+			if (url === backup) {
+				if (!backupAvailable) return new Response(null, { status: 503 });
+				return new Response(
+					'<p>Оновлено 26 листопада о 12:30 Джерело: сайт Чернівціобленерго</p>' +
+						'<h3>Черга 10</h3><p>Сьогодні, 26 листопада Без світла: 13:00–16:00</p>',
+				);
+			}
+			if (String(url).endsWith('/getUpdates')) return Response.json({ ok: true, result: [] });
+			send(JSON.parse(String(options?.body)));
+			return Response.json({ ok: true });
+		});
+		try {
+			await worker.scheduled(cron, bindings);
+			primaryAvailable = true;
+			vi.setSystemTime(new Date('2026-11-26T12:39:00+02:00'));
+			await worker.scheduled(cron, bindings);
+			expect(send.mock.lastCall?.[0].text).toContain('<b>13:00–13:30</b> · Outage expected → Power expected');
+			send.mockClear();
 
-		const reminderTime = new Date('2026-11-26T12:45:00+02:00');
-		const reminder = notification(stale, reminderTime, '10', 'en', update.snapshot);
-		expect(reminder.messages[0]?.text).toBe(
-			'<b>Outage reminder · Chernivtsi · Group 10</b>\n────────────────────\n\n· <b>13:00</b> · Power outage soon · <i>in 15 min</i>',
-		);
-		expect(notification(stale, reminderTime, '10', 'en', reminder.snapshot).messages).toEqual([]);
+			primaryAvailable = false;
+			vi.setSystemTime(new Date('2026-11-26T12:45:00+02:00'));
+			const status = await SELF.fetch('https://example.com/telegram', {
+				method: 'POST',
+				headers: { 'X-Telegram-Bot-Api-Secret-Token': secret },
+				body: JSON.stringify({ update_id: 31, message: { chat: { id: 123 }, text: '/status' } }),
+			});
+			expect(status.status).toBe(204);
+			expect(send.mock.lastCall?.[0].text).toContain('Outage · <b>13:30–16:00</b>\n<i>Last update</i> <b>12:39</b>');
+			await worker.scheduled(cron, bindings);
+			expect(send).toHaveBeenCalledTimes(1);
+			expect(fetchMock.mock.calls.filter(([url]) => url === source)).toHaveLength(3);
+			expect(fetchMock.mock.calls.filter(([url]) => url === backup)).toHaveLength(2);
+
+			backupAvailable = false;
+			vi.setSystemTime(new Date('2026-11-26T13:15:00+02:00'));
+			await worker.scheduled(cron, bindings);
+			expect(send.mock.lastCall?.[0].text).toBe(
+				'<b>Outage reminder · Chernivtsi · Group 10</b>\n────────────────────\n\n· <b>13:30</b> · Power outage soon · <i>in 15 min</i>',
+			);
+			await worker.scheduled(cron, bindings);
+			expect(send).toHaveBeenCalledTimes(2);
+		} finally {
+			fetchMock.mockRestore();
+		}
 	});
 
 	it('ignores changes for tomorrow and retries a change for today if Telegram rejects the send', async () => {
@@ -447,7 +493,7 @@ describe('Chernivtsi electricity bot', () => {
 		}
 	});
 
-	it('returns group 10 from old controls and keeps the same status layout when a check fails', async () => {
+	it('ignores the old group selector and keeps the same status layout when a check fails', async () => {
 		const secret = await webhookSecret('test-token');
 		const now = new Date('2026-11-26T12:45:00+02:00');
 		const group11 = energyUaGroups + '11';
@@ -492,13 +538,17 @@ describe('Chernivtsi electricity bot', () => {
 				});
 			});
 			await press(80, 'groups');
-			expect(edits.mock.lastCall?.[0].reply_markup.inline_keyboard).toEqual([]);
 			await press(81, 'group:11');
-			expect(edits.mock.lastCall?.[0]).toMatchObject({ message_id: 7, text: expect.stringContaining('Group 10') });
 			await press(81, 'group:11');
 			expect(acknowledgments).toHaveBeenCalledTimes(2);
+			expect(edits).not.toHaveBeenCalled();
+			expect(fetchMock.mock.calls.some(([url]) => url === source || url === group11)).toBe(false);
 			await press(82, 'pause');
-			expect(edits.mock.lastCall?.[0].reply_markup.inline_keyboard).toEqual([]);
+			expect(edits.mock.lastCall?.[0]).toMatchObject({
+				message_id: 7,
+				text: expect.stringContaining('Group 10'),
+				reply_markup: { inline_keyboard: [] },
+			});
 			await press(83, 'resume');
 			await worker.scheduled(createScheduledController({ cron: '* * * * *' }), bindings);
 			expect(sends.mock.lastCall?.[0].text).toContain('Group 10');
@@ -867,7 +917,7 @@ describe('schedule cards and reminders', () => {
 		expect(ukrainian).not.toContain('18:00–19:00');
 	});
 
-	it('records revisions to elapsed outages without sending an empty schedule update', () => {
+	it('omits elapsed outages from Today and skips schedule updates that only affect the past', () => {
 		const evening = new Date('2026-11-26T23:00:00+02:00');
 		const previous = { schedule: { today: { ...result.schedule.today, slots: '1'.repeat(48) } } };
 		const today = currentSchedule(result, evening, '10', 'en');
@@ -876,6 +926,7 @@ describe('schedule cards and reminders', () => {
 		expect(today).not.toMatch(/14:00–16:00|18:00–19:00|Updated/);
 		expect(alert.messages).toEqual([]);
 		expect(alert.snapshot.schedule).toEqual(result.schedule);
+		expect(notification(result, evening, '10', 'en', alert.snapshot).messages).toEqual([]);
 	});
 
 	it('sends a clear 15-minute return reminder once and honors preferences', () => {
@@ -890,12 +941,26 @@ describe('schedule cards and reminders', () => {
 		expect(notification(result, now, '10', 'en', previous, { ...defaultAlerts, minutes: 5 }).messages).toEqual([]);
 	});
 
-	it('remembers a legacy reminder when a revision removes and restores the same transition', () => {
+	it('keeps an unchanged legacy reminder and resets it if the transition is removed and restored', () => {
 		const previous = { schedule: result.schedule, warning: '2026-11-26 16:00 · 🟢 Suministro previsto' };
-		const revised = { schedule: { today: { date: '2026-11-26', slots: '1'.repeat(48) } } };
+		const slots = result.schedule.today.slots;
+		const laterRevision = { schedule: { today: { ...result.schedule.today, slots: slots.slice(0, 44) + '3' + slots.slice(45) } } };
+		const removed = { schedule: { today: { ...result.schedule.today, slots: '1'.repeat(48) } } };
 		const preferences = { ...defaultAlerts, updates: false };
-		const { snapshot } = notification(revised, now, '10', 'en', previous, preferences);
-		expect(notification(result, now, '10', 'en', snapshot, preferences).messages).toEqual([]);
+		const updated = notification(laterRevision, now, '10', 'en', previous, preferences);
+		expect(updated.messages).toEqual([]);
+		expect(updated.snapshot.warnings).toEqual(['2026-11-26 16:00 · 1']);
+
+		const canceled = notification(removed, now, '10', 'en', updated.snapshot, preferences);
+		expect(canceled.snapshot.warnings).toBeUndefined();
+		expect(canceled.messages).toEqual([]);
+
+		const restored = notification(result, now, '10', 'en', canceled.snapshot, preferences);
+		expect(restored.messages.map(({ text }) => text)).toEqual([
+			'<b>Power return · Chernivtsi · Group 10</b>\n────────────────────\n\n' +
+				'· <b>16:00</b> · Power expected back soon · <i>in 15 min</i>',
+		]);
+		expect(notification(result, now, '10', 'en', restored.snapshot, preferences).messages).toEqual([]);
 	});
 
 	it('does not present an uncertain interval as a return and describes revised intervals', () => {
@@ -916,8 +981,8 @@ describe('schedule cards and reminders', () => {
 		);
 		const message = revised.messages[0]?.text;
 		expect(message).toContain('· <b>Updated</b>');
-		expect(message).not.toContain('14:00–14:30');
 		expect(message).not.toContain('09:00–10:00');
+		expect(message).not.toContain('14:00–14:30');
 		expect(message).toContain('<b>18:00–19:00</b> · Power expected → Outage expected');
 	});
 
