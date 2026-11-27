@@ -2,12 +2,8 @@ import { fetchSchedulePage, pageText, type Day, type Schedule } from './energy-u
 
 const mirrorUrl = 'https://miyinvertor.com.ua/grafik/chernivtsi';
 
-export function fetchMirrorPage(): Promise<string> {
-	return fetchSchedulePage(mirrorUrl, 'Backup');
-}
-
-export async function readMirror(group: string, date: string, readPage = fetchMirrorPage): Promise<Schedule> {
-	const today = parseMirror(await readPage(), group, date);
+export async function readMirror(group: string, date: string): Promise<Schedule> {
+	const today = parseMirror(await fetchSchedulePage(mirrorUrl, 'Backup'), group, date);
 	if (!today) throw new Error('Backup has no verified schedule for this group today.');
 	return { today };
 }
