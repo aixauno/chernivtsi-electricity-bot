@@ -67,7 +67,8 @@ export function currentSchedule(
 	const scheduled = today ? outageIntervals(today) : [];
 	const current = scheduled.find(({ start, end }) => start <= slot && end > slot);
 	const status = today ? copy.status[today.slots[slot] as Status] : copy.unknownStatus;
-	const lines = [`· <b>${copy.nowShort}</b>`, current ? `${status} · ${range(current.start, current.end)}` : status];
+	const currentStatus = current ? `${status} · ${range(current.start, current.end)}` : status;
+	const sections = [`· <b>${copy.nowShort}</b>\n${currentStatus}`];
 	const upcoming = scheduled.filter(({ start }) => start > slot);
 	const next: string[] = [];
 	if (current && today?.slots[current.end] === '1') next.push(`${copy.status['1']} · <b>${time(current.end)}</b>`);
@@ -77,13 +78,13 @@ export function currentSchedule(
 		next.push(`${copy.outageLabels[status]} · ${range(start, end)}${countdown}`);
 	}
 	if (!today) next.push(copy.unknownTransition);
-	if (next.length) lines.push(`· <b>${copy.nextShort}</b>`, ...next);
-	else if (!current) lines.push(scheduled.length ? copy.noRemainingOutages : copy.noOutages);
+	if (next.length) sections.push([`· <b>${copy.nextShort}</b>`, ...next].join('\n'));
+	else if (!current) sections.push(scheduled.length ? copy.noRemainingOutages : copy.noOutages);
 	if (details.checkedAt !== undefined) {
 		const [, updatedTime] = kyiv.format(new Date(details.checkedAt)).split(' ');
-		lines.push(`<i>${result ? copy.updatedAt : copy.lastUpdate}</i> <b>${updatedTime}</b>`);
+		sections.push(`<i>${result ? copy.updatedAt : copy.lastUpdate}</i> <b>${updatedTime}</b>`);
 	}
-	return formatMessage(group, language, lines.join('\n'), copy.todayTitle);
+	return formatMessage(group, language, sections.join('\n\n'), copy.todayTitle);
 }
 
 type Interval = { start: number; end: number; status: '0' | '3' };
@@ -168,7 +169,7 @@ export function notification(
 		const changes = sameDay ? describeUpdate(old, day, language, slot) : [];
 		if (!sameDay || changes.length) {
 			const heading = sameDay ? copy.updated : copy.initial;
-			const body = [`· <b>${heading}</b>`, ...changes].join('\n');
+			const body = changes.length ? `· <b>${heading}</b>\n\n${changes.join('\n')}` : `· <b>${heading}</b>`;
 			messagesToSend.push({ text: formatMessage(group, language, body, copy.updateTitle), snapshot });
 		}
 	}
