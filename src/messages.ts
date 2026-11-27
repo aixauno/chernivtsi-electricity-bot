@@ -3,21 +3,14 @@ export type Language = 'en' | 'uk';
 export const messages = {
 	en: {
 		title: (group: string) => `Chernivtsi · Group ${group}`,
-		localTime: 'Local time',
-		reminderTime: 'Kyiv time',
+		todayTitle: 'Today status',
+		updateTitle: 'Schedule update',
+		reminderTitles: { '0': 'Outage reminder', '1': 'Power return' },
 		todayButton: 'Today',
-		scheduleUnavailable: 'Schedule unavailable.',
 		unknownStatus: 'Status unknown',
 		unknownTransition: 'Next change unknown',
-		previousSchedule: 'Previous schedule',
 		updatedAt: 'Updated at',
 		lastUpdate: 'Last update',
-		noChanges: 'No changes',
-		changeGroup: 'Change group',
-		chooseGroup: 'Choose your outage group',
-		refresh: 'Refresh',
-		pauseAlerts: 'Pause alerts',
-		resumeAlerts: 'Resume alerts',
 		alertsButton: 'Alert settings',
 		backButton: 'Back',
 		alertLabels: { updates: 'Schedule changes', cutoff: 'Outage reminder', return: 'Power return reminder' },
@@ -25,17 +18,15 @@ export const messages = {
 		alertSettings: '<b>Alert settings</b>\nChoose which alerts to receive.',
 		alertsPaused: 'All alerts are paused. Turn alerts on to receive your selected types.',
 		inMinutes: (minutes: number) => `in ${minutes} min`,
-		events: { '0': 'Outage starts', '1': 'Power expected back' },
+		events: { '0': 'Power outage soon', '1': 'Power expected back soon' },
 		welcome:
 			'<b>Welcome!</b> I track scheduled power outages in Chernivtsi. Use the buttons to turn alerts on or off.\n\n<b>Commands</b>\n<b>/status</b> — current status and published schedule\n<b>/language</b> — choose your language\n<b>/subscribe</b> — receive alerts\n<b>/unsubscribe</b> — stop alerts\n<b>/help</b> — show this guide',
 		language: '<b>Choose your language</b>',
 		saved: '<b>English selected</b>',
-		unavailable: 'No current schedule could be verified.',
-		initial: '<b>First published schedule</b>',
-		updated: '<b>Schedule updated</b>',
+		initial: 'First published schedule',
+		updated: 'Updated',
 		nowShort: 'NOW',
 		nextShort: 'NEXT',
-		nextStatus: { '0': 'Outage', '1': 'Power expected', '3': 'Supply uncertain' },
 		outageLabels: { '0': 'Outage', '3': 'Supply uncertain' },
 		noOutages: 'No outages scheduled.',
 		noRemainingOutages: 'No more outages scheduled for today.',
@@ -43,26 +34,19 @@ export const messages = {
 		languageButton: 'Language',
 		subscribeButton: 'Receive alerts',
 		unsubscribeButton: 'Stop alerts',
-		subscribed: '<b>Alerts are on</b>\nChoose what to receive in Alert settings.',
-		unsubscribed: '<b>Alerts are off</b>\nYou can still check the schedule with /status.',
+		subscribed: '<b>Alerts are on</b>',
+		unsubscribed: '<b>Alerts are off</b>',
 	},
 	uk: {
 		title: (group: string) => `Чернівці · Група ${group}`,
-		localTime: 'Місцевий час',
-		reminderTime: 'Київський час',
+		todayTitle: 'Стан на сьогодні',
+		updateTitle: 'Оновлення графіка',
+		reminderTitles: { '0': 'Нагадування про відключення', '1': 'Відновлення живлення' },
 		todayButton: 'Сьогодні',
-		scheduleUnavailable: 'Графік недоступний.',
 		unknownStatus: 'Стан невідомий',
 		unknownTransition: 'Час наступної зміни невідомий',
-		previousSchedule: 'Попередній графік',
 		updatedAt: 'Оновлено о',
 		lastUpdate: 'Останнє оновлення',
-		noChanges: 'Без змін',
-		changeGroup: 'Змінити чергу',
-		chooseGroup: 'Оберіть свою чергу',
-		refresh: 'Оновити',
-		pauseAlerts: 'Призупинити сповіщення',
-		resumeAlerts: 'Відновити сповіщення',
 		alertsButton: 'Налаштування сповіщень',
 		backButton: 'Назад',
 		alertLabels: { updates: 'Зміни графіка', cutoff: 'Нагадування про відключення', return: 'Нагадування про відновлення' },
@@ -70,17 +54,15 @@ export const messages = {
 		alertSettings: '<b>Налаштування сповіщень</b>\nОберіть, які сповіщення отримувати.',
 		alertsPaused: 'Усі сповіщення призупинено. Увімкніть їх, щоб отримувати вибрані типи.',
 		inMinutes: (minutes: number) => `через ${minutes} хв`,
-		events: { '0': 'Початок відключення', '1': 'Очікуване відновлення живлення' },
+		events: { '0': 'Незабаром відключення', '1': 'Незабаром очікується відновлення живлення' },
 		welcome:
 			'<b>Вітаю!</b> Я відстежую графік відключень електроенергії в Чернівцях. Сповіщення можна увімкнути або вимкнути кнопками.\n\n<b>Команди</b>\n<b>/status</b> — поточний стан і графік\n<b>/language</b> — вибрати мову\n<b>/subscribe</b> — увімкнути сповіщення\n<b>/unsubscribe</b> — вимкнути сповіщення\n<b>/help</b> — показати довідку',
 		language: '<b>Оберіть мову</b>',
 		saved: '<b>Обрано українську мову</b>',
-		unavailable: 'Актуальний графік наразі недоступний або його не вдалося перевірити.',
-		initial: '<b>Перший опублікований графік</b>',
-		updated: '<b>Графік оновлено</b>',
+		initial: 'Перший опублікований графік',
+		updated: 'Оновлено',
 		nowShort: 'ЗАРАЗ',
 		nextShort: 'ДАЛІ',
-		nextStatus: { '0': 'Відключення', '1': 'Очікується електропостачання', '3': 'Електропостачання невизначене' },
 		outageLabels: { '0': 'Відключення', '3': 'Електропостачання невизначене' },
 		noOutages: 'Відключень не заплановано.',
 		noRemainingOutages: 'На сьогодні більше відключень не заплановано.',
@@ -88,8 +70,8 @@ export const messages = {
 		languageButton: 'Мова',
 		subscribeButton: 'Отримувати сповіщення',
 		unsubscribeButton: 'Вимкнути сповіщення',
-		subscribed: '<b>Сповіщення увімкнено</b>\nОберіть потрібні типи в налаштуваннях сповіщень.',
-		unsubscribed: '<b>Сповіщення вимкнено</b>\nВи й надалі можете переглядати графік за допомогою /status.',
+		subscribed: '<b>Сповіщення увімкнено</b>',
+		unsubscribed: '<b>Сповіщення вимкнено</b>',
 	},
 };
 
@@ -111,43 +93,9 @@ export function alertMenu(language: Language, preferences: AlertPreferences) {
 	};
 }
 
-export function formatMessage(group: string, language: Language, ...sections: string[]): string {
+export function formatMessage(group: string, language: Language, body: string, heading?: string): string {
 	const title = messages[language].title(group).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-	const header = `<b>${title}</b>\n────────────────────`;
-	return [header, ...sections].join('\n\n');
-}
-
-export function statusMenu(language: Language, subscribed: boolean) {
-	const copy = messages[language];
-	return {
-		inline_keyboard: [
-			[
-				{ text: copy.changeGroup, callback_data: 'groups' },
-				{ text: copy.refresh, callback_data: 'status' },
-			],
-			[{ text: subscribed ? copy.pauseAlerts : copy.resumeAlerts, callback_data: subscribed ? 'pause' : 'resume' }],
-		],
-	};
-}
-
-const groups = Array.from({ length: 12 }, (_, index) => String(index + 1));
-
-export function groupMenu(language: Language, group: string) {
-	return {
-		inline_keyboard: [
-			...Array.from({ length: 4 }, (_, row) =>
-				groups
-					.slice(row * 3, row * 3 + 3)
-					.map((value) => ({ text: value === group ? `✓ ${value}` : value, callback_data: `group:${value}` })),
-			),
-			[{ text: messages[language].backButton, callback_data: 'status' }],
-		],
-	};
-}
-
-export function selectedGroup(data: string | undefined) {
-	const group = data?.startsWith('group:') ? data.slice(6) : undefined;
-	return group && groups.includes(group) ? group : undefined;
+	return `<b>${heading ? heading + ' · ' : ''}${title}</b>\n────────────────────\n\n${body}`;
 }
 
 export function menu(language: Language, subscribed: boolean) {

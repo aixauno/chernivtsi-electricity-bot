@@ -1,22 +1,18 @@
 import { DurableObject } from 'cloudflare:workers';
-import { scheduleDate, type Schedule } from './energy-ua';
+import { scheduleDate } from './energy-ua';
 import { readBrowserSchedule } from './energy-ua-browser';
 import {
 	alertMenu,
 	defaultAlerts,
-	groupMenu,
 	languageMenu,
 	menu,
 	formatMessage,
 	messages,
 	parseCommand,
-	selectedGroup,
-	statusMenu,
 	type AlertPreferences,
 	type Language,
 } from './messages';
 import { currentSchedule, loadSchedule, notification, type Snapshot, type VerifiedSchedule } from './schedule';
-import { fetchMirrorPage } from './schedule-backup';
 import { answerCallback, editMessage, getUpdates, sendMessage, webhookSecret, type TelegramUpdate } from './telegram';
 
 type BotEnv = Omit<Env, 'MONITOR' | 'OUTAGE_GROUP'> & {
@@ -36,11 +32,7 @@ const pollingOffsetLifetimeMs = 24 * 60 * 60_000;
 type PollingOffset = { offset: number; updatedAt: number };
 
 type SuccessfulCheck = { checkedAt: number; result: VerifiedSchedule };
-type ScheduleCheck = { date: string } & (
-	(SuccessfulCheck & { previous?: Schedule }) | { checkedAt: number; error: string; lastSuccess?: SuccessfulCheck }
-);
-
-const groupKey = (chatId: string) => 'telegram:group:' + chatId;
+type ScheduleCheck = { date: string } & (SuccessfulCheck | { checkedAt: number; error: string; lastSuccess?: SuccessfulCheck });
 
 async function subscribers(storage: Pick<DurableObjectStorage, 'get'>, owner: string): Promise<string[]> {
 	const saved = await storage.get<string[]>(subscriberKey);
@@ -62,7 +54,6 @@ export class ElectricityMonitor extends DurableObject<BotEnv> {
 	private readonly scheduleRefreshes = new Map<string, Promise<ScheduleCheck>>();
 	private readonly updatesInFlight = new Map<number, Promise<void>>();
 	private readonly chatOperations = new Map<string, Promise<void>>();
-	private mirrorPage?: Promise<string>;
 
 	constructor(ctx: DurableObjectState, env: BotEnv) {
 		super(ctx, env);
@@ -152,12 +143,6 @@ export class ElectricityMonitor extends DurableObject<BotEnv> {
 		}
 	}
 
-	private readMirrorPage(): Promise<string> {
-		return (this.mirrorPage ??= fetchMirrorPage().finally(() => {
-			this.mirrorPage = undefined;
-		}));
-	}
-
 	private async getSchedule(group: string): Promise<{ check: ScheduleCheck; now: Date }> {
 		const key = 'schedule:checked:' + group;
 		let check = await this.ctx.storage.get<ScheduleCheck>(key);
@@ -180,21 +165,8 @@ export class ElectricityMonitor extends DurableObject<BotEnv> {
 		const checkedAt = now.getTime();
 		const lastSuccess =
 			previous && ('result' in previous ? { checkedAt: previous.checkedAt, result: previous.result } : previous.lastSuccess);
-		const check = await loadSchedule(
-			group,
-			now,
-			(day) => readBrowserSchedule(this.env.BROWSER, this.ctx.storage, group, day, now),
-			() => this.readMirrorPage(),
-		).then(
-			(result): ScheduleCheck => {
-				const previousSchedule = lastSuccess?.result.schedule;
-				return {
-					date,
-					checkedAt,
-					result,
-					...(previousSchedule?.today.date === date && { previous: previousSchedule }),
-				};
-			},
+		const check = await loadSchedule(group, now, (day) => readBrowserSchedule(this.env.BROWSER, this.ctx.storage, group, day, now)).then(
+			(result): ScheduleCheck => ({ date, checkedAt, result }),
 			(error: unknown): ScheduleCheck => ({ date, checkedAt, error: error instanceof Error ? error.message : String(error), lastSuccess }),
 		);
 		await this.ctx.storage.put(key, check);
@@ -212,26 +184,18 @@ export class ElectricityMonitor extends DurableObject<BotEnv> {
 
 	private async pollNotices(token: string, chatId: string, group: string) {
 		const recipients = await subscribers(this.ctx.storage, chatId);
-		const choices = await this.ctx.storage.get<string>(recipients.map(groupKey));
-		const byGroup = Map.groupBy(recipients, (recipient) => choices.get(groupKey(recipient)) ?? group);
-		if (!byGroup.size) byGroup.set(group, []);
+		const { check } = await this.getSchedule(group);
+		if ('error' in check) throw new Error(check.error);
 		const deliveries = await Promise.allSettled(
-			Array.from(byGroup, async ([selected, chats]) => {
-				const { check } = await this.getSchedule(selected);
-				if ('error' in check) throw new Error(check.error);
-				const deliveries = await Promise.allSettled(
-					chats.map((chat) => this.forChat(chat, () => this.sendNotice(token, chatId, chat, selected, check))),
-				);
-				for (const delivery of deliveries) if (delivery.status === 'rejected') throw delivery.reason;
-			}),
+			recipients.map((chat) => this.forChat(chat, () => this.sendNotice(token, chatId, chat, group, check))),
 		);
 		for (const delivery of deliveries) if (delivery.status === 'rejected') throw delivery.reason;
 	}
 
 	private async reply(update: TelegramUpdate): Promise<void> {
-		const { TELEGRAM_BOT_TOKEN: token, TELEGRAM_CHAT_ID: owner, OUTAGE_GROUP: defaultGroup } = this.env;
+		const { TELEGRAM_BOT_TOKEN: token, TELEGRAM_CHAT_ID: owner, OUTAGE_GROUP: group } = this.env;
 		if (!token || !owner) return;
-		if (update.callback_query) return this.replyToCallback(token, owner, defaultGroup, update.callback_query);
+		if (update.callback_query) return this.replyToCallback(token, owner, group, update.callback_query);
 		const message = update.message;
 		if (!message || !Number.isSafeInteger(message.chat?.id) || typeof message.text !== 'string') return;
 		const chatId = String(message.chat.id);
@@ -239,7 +203,6 @@ export class ElectricityMonitor extends DurableObject<BotEnv> {
 		if (!command) return;
 		if (chatId !== owner && message.chat.type !== 'private') return;
 
-		const group = (await this.ctx.storage.get<string>(groupKey(chatId))) ?? defaultGroup;
 		const languageKey = 'telegram:language:' + chatId;
 		if (command === 'en' || command === 'uk') {
 			await this.ctx.storage.put(languageKey, command);
@@ -281,52 +244,32 @@ export class ElectricityMonitor extends DurableObject<BotEnv> {
 			await sendMessage(token, chatId, formatMessage(group, language, copy.language), languageMenu);
 		} else {
 			const status = await this.status(group, language);
-			const active = (await subscribers(this.ctx.storage, owner)).includes(chatId);
-			await sendMessage(token, chatId, status, statusMenu(language, active));
+			await sendMessage(token, chatId, status);
 		}
 	}
 
 	private async status(group: string, language: Language) {
 		const { check, now } = await this.getSchedule(group);
 		return 'result' in check
-			? currentSchedule(check.result, now, group, language, { checkedAt: check.checkedAt, previous: check.previous })
+			? currentSchedule(check.result, now, group, language, { checkedAt: check.checkedAt })
 			: currentSchedule(undefined, now, group, language, {
 					checkedAt: check.lastSuccess?.checkedAt,
 					stale: check.lastSuccess?.result.schedule,
 				});
 	}
 
-	private async replyToCallback(
-		token: string,
-		owner: string,
-		defaultGroup: string,
-		callback: NonNullable<TelegramUpdate['callback_query']>,
-	) {
+	private async replyToCallback(token: string, owner: string, group: string, callback: NonNullable<TelegramUpdate['callback_query']>) {
 		if (typeof callback.id !== 'string') return;
 		const { message, data } = callback;
 		if (!message || !Number.isSafeInteger(message.chat?.id) || !Number.isSafeInteger(message.message_id) || typeof data !== 'string')
 			return;
 		const chatId = String(message.chat.id);
 		if (chatId !== owner && message.chat.type !== 'private') return;
-		const selected = selectedGroup(data);
-		if (!selected && !['groups', 'status', 'pause', 'resume'].includes(data)) return;
+		if (!data.startsWith('group:') && !['groups', 'status', 'pause', 'resume'].includes(data)) return;
 		const language = (await this.ctx.storage.get<Language>('telegram:language:' + chatId)) ?? 'en';
-		const group = selected ?? (await this.ctx.storage.get<string>(groupKey(chatId))) ?? defaultGroup;
-		if (data === 'groups') {
-			await editMessage(
-				token,
-				chatId,
-				message.message_id,
-				formatMessage(group, language, messages[language].chooseGroup),
-				groupMenu(language, group),
-			);
-			return;
-		}
-		if (selected) await this.ctx.storage.put(groupKey(chatId), selected);
 		if (data === 'pause' || data === 'resume') await setAlerts(this.ctx.storage, owner, chatId, data === 'resume');
 		const status = await this.status(group, language);
-		const active = (await subscribers(this.ctx.storage, owner)).includes(chatId);
-		await editMessage(token, chatId, message.message_id, status, statusMenu(language, active));
+		await editMessage(token, chatId, message.message_id, status, { inline_keyboard: [] });
 	}
 
 	private async readCommands(token: string, now: Date): Promise<void> {
@@ -355,15 +298,12 @@ export class ElectricityMonitor extends DurableObject<BotEnv> {
 		const key = 'schedule:' + group + ':' + chatId;
 		const languageKey = 'telegram:language:' + chatId;
 		const preferencesKey = 'telegram:alerts:' + chatId;
-		const selectionKey = groupKey(chatId);
 		const state = await this.ctx.storage.get<string | string[] | Snapshot | AlertPreferences>([
 			key,
 			languageKey,
 			preferencesKey,
-			selectionKey,
 			subscriberKey,
 		]);
-		if ((state.get(selectionKey) ?? this.env.OUTAGE_GROUP) !== group) return;
 		const recipients = state.get(subscriberKey) as string[] | undefined;
 		const subscribed =
 			recipients?.includes(chatId) ?? (chatId === owner || (await this.ctx.storage.get<string[]>(legacyRecipientKey))?.includes(chatId));
@@ -373,9 +313,14 @@ export class ElectricityMonitor extends DurableObject<BotEnv> {
 		const language = (state.get(languageKey) as Language | undefined) ?? 'en';
 		const previous = state.get(key) as Snapshot | undefined;
 		const preferences = state.get(preferencesKey) as AlertPreferences | undefined;
-		const { snapshot, message } = notification(check.result, now, group, language, previous, preferences, check.checkedAt);
-		if (message) await sendMessage(token, chatId, message, statusMenu(language, true));
-		if (JSON.stringify(snapshot) !== JSON.stringify(previous)) await this.ctx.storage.put(key, snapshot);
+		const notice = notification(check.result, now, group, language, previous, preferences);
+		for (const { text, snapshot } of notice.messages) {
+			await sendMessage(token, chatId, text);
+			await this.ctx.storage.put(key, snapshot);
+		}
+		if (!notice.messages.length && JSON.stringify(notice.snapshot) !== JSON.stringify(previous)) {
+			await this.ctx.storage.put(key, notice.snapshot);
+		}
 	}
 }
 

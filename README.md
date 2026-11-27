@@ -29,7 +29,7 @@
 | `/subscribe` or `/unsubscribe` | Turns alerts on or off.                                                                   |
 | `/language`                    | Switches between English and Ukrainian.                                                   |
 
-- Choose your **outage group** from 1 to 12 in `/status`.
+- The bot shows **group 10** in status and alerts.
 - Set **reminders** in `/alerts` for 5, 15, or 30 minutes before a planned outage or restoration.
 
 > All schedule times use the 24-hour clock in Kyiv local time.

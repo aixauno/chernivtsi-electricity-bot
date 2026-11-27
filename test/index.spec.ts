@@ -44,7 +44,7 @@ describe('Chernivtsi electricity bot', () => {
 			expect(fetchMock).toHaveBeenCalledTimes(1);
 			expect(fetchMock).toHaveBeenCalledWith(source, expect.objectContaining({ cache: 'no-store' }));
 			expect(Object.keys(schedule.schedule)).toEqual(['today']);
-			expect(currentSchedule(schedule, now, '10', 'en')).toContain('<b>NEXT</b> · <b>11:00</b> · Outage');
+			expect(currentSchedule(schedule, now, '10', 'en')).toContain('· <b>NEXT</b>\nOutage · <b>11:00–14:00</b>');
 			date = '2026-11-25';
 			await expect(loadSchedule('10', now)).rejects.toThrow('no verified schedule');
 			date = '2026-11-26';
@@ -78,8 +78,7 @@ describe('Chernivtsi electricity bot', () => {
 		const fromPayload = parseEnergyUa(page(today, tomorrow), '10', date);
 		expect(fromPayload).toEqual(parseEnergyUa(html, '10', date));
 		const card = currentSchedule({ schedule: fromPayload }, new Date('2026-11-26T23:45:00+02:00'), '10', 'en');
-		expect(card).toContain('<b>Chernivtsi · Group 10</b>');
-		expect(card).toContain('<b>Today · THU 26 NOV</b> · <i>Local time</i>');
+		expect(card).toContain('<b>Today status · Chernivtsi · Group 10</b>');
 		expect(card).not.toMatch(/NEXT|Tomorrow|00:00–02:00/);
 	});
 
@@ -129,15 +128,17 @@ describe('Chernivtsi electricity bot', () => {
 		const revised = { today: { date: '2026-11-26', slots: '1'.repeat(26) + '0'.repeat(6) + '1'.repeat(16) } };
 		const first = notification({ schedule: original, source: 'mirror' }, now, '10', 'en');
 		const update = notification({ schedule: revised, source: 'energy-ua' }, now, '10', 'en', first.snapshot);
-		expect(update.message).toContain('13:00–16:00');
+		expect(update.messages[0]?.text).toContain('13:00–16:00');
 		const stale = { schedule: original, source: 'mirror' } as const;
-		expect(notification(stale, now, '10', 'en', update.snapshot).message).toBeUndefined();
-		expect(notification({ schedule: revised, source: 'mirror' }, now, '10', 'en', update.snapshot).message).toBeUndefined();
+		expect(notification(stale, now, '10', 'en', update.snapshot).messages).toEqual([]);
+		expect(notification({ schedule: revised, source: 'mirror' }, now, '10', 'en', update.snapshot).messages).toEqual([]);
 
 		const reminderTime = new Date('2026-11-26T12:45:00+02:00');
 		const reminder = notification(stale, reminderTime, '10', 'en', update.snapshot);
-		expect(reminder.message).toContain('✦ <b>Outage starts · 13:00</b> · <i>in 15 min</i>');
-		expect(notification(stale, reminderTime, '10', 'en', reminder.snapshot).message).toBeUndefined();
+		expect(reminder.messages[0]?.text).toBe(
+			'<b>Outage reminder · Chernivtsi · Group 10</b>\n────────────────────\n\n· <b>13:00</b> · Power outage soon · <i>in 15 min</i>',
+		);
+		expect(notification(stale, reminderTime, '10', 'en', reminder.snapshot).messages).toEqual([]);
 	});
 
 	it('ignores changes for tomorrow and retries a change for today if Telegram rejects the send', async () => {
@@ -193,7 +194,7 @@ describe('Chernivtsi electricity bot', () => {
 			expect(send.mock.lastCall?.[0]).toEqual(send.mock.calls[0][0]);
 			expect(send.mock.lastCall?.[0]).toMatchObject({
 				chat_id: '123',
-				text: expect.stringContaining('<code>13:00–14:00</code> · Outage expected → Power expected'),
+				text: expect.stringContaining('<b>13:00–14:00</b> · Outage expected → Power expected'),
 			});
 			atMinute(8);
 			await worker.scheduled(cron, bindings);
@@ -209,12 +210,12 @@ describe('Chernivtsi electricity bot', () => {
 			useBackup = true;
 			atMinute(9);
 			await worker.scheduled(cron, bindings);
-			expect(send.mock.lastCall?.[0].text).toContain('<code>14:00–15:00</code> · Outage expected → Power expected');
+			expect(send.mock.lastCall?.[0].text).toContain('<b>14:00–15:00</b> · Outage expected → Power expected');
 
 			useBackup = false;
 			atMinute(12);
 			await worker.scheduled(cron, bindings);
-			expect(send.mock.lastCall?.[0].text).toContain('<code>14:00–15:00</code> · Power expected → Outage expected');
+			expect(send.mock.lastCall?.[0].text).toContain('<b>14:00–15:00</b> · Power expected → Outage expected');
 			atMinute(13);
 			await worker.scheduled(cron, bindings);
 			expect(send).toHaveBeenCalledTimes(4);
@@ -252,8 +253,10 @@ describe('Chernivtsi electricity bot', () => {
 			expect(send).toHaveBeenCalledTimes(2);
 			expect(send.mock.lastCall?.[0]).toMatchObject({ chat_id: '123', parse_mode: 'HTML' });
 			const message = send.mock.lastCall?.[0].text;
-			expect(message).toMatch(/^<b>Chernivtsi · Group 10<\/b>\n────────────────────\n\n/u);
-			expect(message).toContain('✦ <b>Schedule updated</b>\n<code>23:00–23:30</code> · Power expected → Supply uncertain');
+			expect(message).toBe(
+				'<b>Schedule update · Chernivtsi · Group 10</b>\n────────────────────\n\n' +
+					'· <b>Updated</b>\n<b>23:00–23:30</b> · Power expected → Supply uncertain',
+			);
 			expect(message).not.toContain('16:00–17:00');
 			await worker.scheduled(cron, bindings);
 			expect(send).toHaveBeenCalledTimes(2);
@@ -302,13 +305,11 @@ describe('Chernivtsi electricity bot', () => {
 		try {
 			const card = currentSchedule(await loadSchedule('10', now), now, '10', 'en');
 			expect(card).toBe(
-				'<b>Chernivtsi · Group 10</b>\n────────────────────\n\n' +
-					'<b>NOW</b> · Outage expected\n<b>NEXT</b> · <b>16:00</b> · Supply uncertain\n\n' +
-					'<b>Today · THU 26 NOV</b> · <i>Local time</i>\n' +
-					'╌ <b>13:00–16:00</b>\n' +
-					'╌ <b>16:00–16:30</b> · <i>Supply uncertain</i>\n' +
-					'╌ <b>19:00–21:00</b>\n' +
-					'╰ <b>21:00–21:30</b> · <i>Supply uncertain</i>',
+				'<b>Today status · Chernivtsi · Group 10</b>\n────────────────────\n\n' +
+					'· <b>NOW</b>\nOutage expected · <b>13:00–16:00</b>\n· <b>NEXT</b>\n' +
+					'Supply uncertain · <b>16:00–16:30</b>\n' +
+					'Outage · <b>19:00–21:00</b>\n' +
+					'Supply uncertain · <b>21:00–21:30</b>',
 			);
 			date = '25 листопада';
 			await expect(loadSchedule('10', now)).rejects.toThrow('HTTP 403');
@@ -350,7 +351,10 @@ describe('Chernivtsi electricity bot', () => {
 
 			expect((await post(61, 456, '/uk')).status).toBe(204);
 			expect((await post(62, 456, 'Отримувати сповіщення')).status).toBe(204);
-			expect(sends.at(-1)).toMatchObject({ chat_id: '456', text: expect.stringContaining('Сповіщення увімкнено') });
+			expect(sends.at(-1)).toMatchObject({
+				chat_id: '456',
+				text: '<b>Чернівці · Група 10</b>\n────────────────────\n\n<b>Сповіщення увімкнено</b>',
+			});
 			await worker.scheduled(cron, bindings);
 			const notices = sends.filter(
 				({ text }) => text.includes('<b>First published schedule</b>') || text.includes('<b>Перший опублікований графік</b>'),
@@ -364,7 +368,10 @@ describe('Chernivtsi electricity bot', () => {
 			);
 
 			expect((await post(63, 123, 'Stop alerts')).status).toBe(204);
-			expect(sends.at(-1)).toMatchObject({ chat_id: '123', text: expect.stringContaining('Alerts are off') });
+			expect(sends.at(-1)).toMatchObject({
+				chat_id: '123',
+				text: '<b>Chernivtsi · Group 10</b>\n────────────────────\n\n<b>Alerts are off</b>',
+			});
 			slots = '1'.repeat(48);
 			sends.length = 0;
 			vi.setSystemTime(now.getTime() + 3 * 60_000);
@@ -372,7 +379,7 @@ describe('Chernivtsi electricity bot', () => {
 			expect(sends).toEqual([
 				expect.objectContaining({
 					chat_id: '456',
-					text: expect.stringContaining('Графік оновлено'),
+					text: expect.stringContaining('· <b>Оновлено</b>'),
 				}),
 			]);
 			await post(64, 456, '✓ Зміни графіка');
@@ -386,7 +393,7 @@ describe('Chernivtsi electricity bot', () => {
 		}
 	});
 
-	it('rechecks Energy UA after three minutes or at Kyiv midnight and adds inline status controls', async () => {
+	it('rechecks Energy UA after three minutes or at Kyiv midnight and sends status without inline controls', async () => {
 		const secret = await webhookSecret('test-token');
 		const now = new Date('2026-11-26T23:55:00+02:00');
 		vi.useFakeTimers({ toFake: ['Date'] });
@@ -423,17 +430,9 @@ describe('Chernivtsi electricity bot', () => {
 				1,
 				expect.objectContaining({
 					text: expect.stringContaining('No outages scheduled.'),
-					reply_markup: expect.objectContaining({
-						inline_keyboard: [
-							[
-								{ text: 'Change group', callback_data: 'groups' },
-								{ text: 'Refresh', callback_data: 'status' },
-							],
-							[{ text: 'Pause alerts', callback_data: 'pause' }],
-						],
-					}),
 				}),
 			);
+			expect(sent.mock.calls[0][0]).not.toHaveProperty('reply_markup');
 			expect(sent).toHaveBeenNthCalledWith(3, expect.objectContaining({ text: expect.stringContaining('00:00–24:00') }));
 			await worker.scheduled(createScheduledController({ cron: '* * * * *' }), bindings);
 			expect(fetchMock.mock.calls.filter(([url]) => url === source)).toHaveLength(3);
@@ -448,7 +447,7 @@ describe('Chernivtsi electricity bot', () => {
 		}
 	});
 
-	it('updates the same card, shares the selected group with alerts, and renders changes or stale schedules', async () => {
+	it('returns group 10 from old controls and keeps the same status layout when a check fails', async () => {
 		const secret = await webhookSecret('test-token');
 		const now = new Date('2026-11-26T12:45:00+02:00');
 		const group11 = energyUaGroups + '11';
@@ -460,10 +459,10 @@ describe('Chernivtsi electricity bot', () => {
 		vi.useFakeTimers({ toFake: ['Date'] });
 		vi.setSystemTime(now);
 		const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, options) => {
-			if (url === group11 || url === backup) {
+			if (url === source || url === backup) {
 				if (offline || url === backup) return new Response(null, { status: 503 });
 				return new Response(
-					'<div>Ваша черга <b>11</b></div><script id="schedulePayload">' +
+					'<div>Ваша черга <b>10</b></div><script id="schedulePayload">' +
 						JSON.stringify({ dates: { today: '26.11.2026' }, today: [{ from: outage * 60, to: 16 * 60, status: 'red' }] }) +
 						'</script>',
 				);
@@ -486,33 +485,40 @@ describe('Chernivtsi electricity bot', () => {
 			expect(response.status).toBe(204);
 		};
 		try {
+			await runInDurableObject(bindings.MONITOR.getByName('chernivtsi'), async (_monitor, state) => {
+				await state.storage.put({
+					'telegram:group:123': '11',
+					'energy-ua:browser-usage': { utcDay: '2026-11-26', usedMs: 0, lastAttempt: now.getTime() + 540_000 },
+				});
+			});
 			await press(80, 'groups');
-			expect(edits.mock.lastCall?.[0].reply_markup.inline_keyboard.flat()).toContainEqual({ text: '11', callback_data: 'group:11' });
+			expect(edits.mock.lastCall?.[0].reply_markup.inline_keyboard).toEqual([]);
 			await press(81, 'group:11');
-			expect(edits.mock.lastCall?.[0]).toMatchObject({ message_id: 7, text: expect.stringContaining('Group 11') });
+			expect(edits.mock.lastCall?.[0]).toMatchObject({ message_id: 7, text: expect.stringContaining('Group 10') });
 			await press(81, 'group:11');
 			expect(acknowledgments).toHaveBeenCalledTimes(2);
 			await press(82, 'pause');
-			expect(edits.mock.lastCall?.[0].reply_markup.inline_keyboard[1]).toEqual([{ text: 'Resume alerts', callback_data: 'resume' }]);
+			expect(edits.mock.lastCall?.[0].reply_markup.inline_keyboard).toEqual([]);
 			await press(83, 'resume');
 			await worker.scheduled(createScheduledController({ cron: '* * * * *' }), bindings);
-			expect(sends.mock.lastCall?.[0].text).toContain('Group 11');
-			expect(fetchMock.mock.calls.filter(([url]) => url === group11)).toHaveLength(1);
-			expect(fetchMock.mock.calls.some(([url]) => url === source)).toBe(false);
+			expect(sends.mock.lastCall?.[0].text).toContain('Group 10');
+			expect(fetchMock.mock.calls.filter(([url]) => url === source)).toHaveLength(1);
+			expect(fetchMock.mock.calls.some(([url]) => url === group11)).toBe(false);
 
 			vi.setSystemTime(now.getTime() + 180_000);
 			await press(84, 'status');
-			expect(edits.mock.lastCall?.[0].text).toContain('<i>No changes</i>');
+			expect(edits.mock.lastCall?.[0].text).toContain('Outage · <b>14:00–16:00</b>');
 			outage = 15;
 			vi.setSystemTime(now.getTime() + 360_000);
 			await press(85, 'status');
-			expect(edits.mock.lastCall?.[0].text).toContain('<code>14:00–15:00</code> · Outage expected → Power expected');
+			expect(edits.mock.lastCall?.[0].text).toContain('Outage · <b>15:00–16:00</b>');
 			offline = true;
 			vi.setSystemTime(now.getTime() + 540_000);
 			await press(86, 'status');
-			expect(edits.mock.lastCall?.[0].text).toContain('<b>NOW</b> · Status unknown');
-			expect(edits.mock.lastCall?.[0].text).toContain('<i>Previous schedule</i>\n╰ <b>15:00–16:00</b>');
-			expect(edits.mock.lastCall?.[0].text).toContain('<i>Last update</i> <b>12:51</b>');
+			expect(edits.mock.lastCall?.[0].text).toBe(
+				'<b>Today status · Chernivtsi · Group 10</b>\n────────────────────\n\n' +
+					'· <b>NOW</b>\nPower expected\n· <b>NEXT</b>\nOutage · <b>15:00–16:00</b>\n<i>Last update</i> <b>12:51</b>',
+			);
 		} finally {
 			warn.mockRestore();
 			fetchMock.mockRestore();
@@ -579,7 +585,8 @@ describe('Chernivtsi electricity bot', () => {
 			await worker.scheduled(createScheduledController({ cron: '* * * * *' }), bindings);
 			expect(checks).toBe(2);
 			expect(sends).toHaveBeenCalledTimes(2);
-			for (const [message] of sends.mock.calls) expect(message).toContain('<b>Today · FRI 27 NOV</b>');
+			expect(sends.mock.calls[0][0]).toContain('Outage expected · <b>00:00–24:00</b>');
+			expect(sends.mock.calls[1][0]).toContain('· <b>First published schedule</b>');
 		} finally {
 			fetchMock.mockRestore();
 		}
@@ -626,9 +633,37 @@ describe('Chernivtsi electricity bot', () => {
 			expect(telegram).toHaveBeenLastCalledWith({
 				chat_id: '123',
 				parse_mode: 'HTML',
-				text: expect.stringContaining('<b>Chernivtsi · Group 10</b>'),
-				reply_markup: expect.objectContaining({ inline_keyboard: expect.any(Array) }),
+				text: expect.stringContaining('<b>Schedule update · Chernivtsi · Group 10</b>'),
 			});
+		} finally {
+			fetchMock.mockRestore();
+		}
+	});
+
+	it('retries only the reminder when a simultaneous schedule update has already been sent', async () => {
+		const now = new Date('2026-11-26T12:45:00+02:00');
+		vi.useFakeTimers({ toFake: ['Date'] });
+		vi.setSystemTime(now);
+		const send = vi.fn<(_: { text: string }) => Response>(() => Response.json({ ok: true }));
+		send.mockImplementationOnce(() => Response.json({ ok: true }));
+		send.mockImplementationOnce(() => Response.json({ ok: false }, { status: 503 }));
+		const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, options) => {
+			if (url === source) {
+				return energyPage('2026-11-26', '00:00 – 13:00 Є світло 13:00 – 16:00 Немає світла 16:00 – 24:00 Є світло');
+			}
+			if (String(url).endsWith('/getUpdates')) return Response.json({ ok: true, result: [] });
+			return send(JSON.parse(String(options?.body)));
+		});
+		try {
+			const cron = createScheduledController({ cron: '* * * * *' });
+			await expect(worker.scheduled(cron, bindings)).rejects.toThrow('Telegram sendMessage failed. HTTP 503.');
+			await worker.scheduled(cron, bindings);
+			await worker.scheduled(cron, bindings);
+			expect(send.mock.calls.map(([{ text }]) => text.split(' · ')[0])).toEqual([
+				'<b>Schedule update',
+				'<b>Outage reminder',
+				'<b>Outage reminder',
+			]);
 		} finally {
 			fetchMock.mockRestore();
 		}
@@ -668,7 +703,7 @@ describe('Chernivtsi electricity bot', () => {
 				}
 			});
 			expect(notice).not.toHaveBeenCalled();
-			expect(edit.mock.lastCall?.[0].reply_markup.inline_keyboard[1]).toEqual([{ text: 'Resume alerts', callback_data: 'resume' }]);
+			expect(edit.mock.lastCall?.[0].reply_markup.inline_keyboard).toEqual([]);
 			expect(fetchMock.mock.calls.filter(([url]) => url === source)).toHaveLength(1);
 		} finally {
 			fetchMock.mockRestore();
@@ -701,7 +736,7 @@ describe('Chernivtsi electricity bot', () => {
 		}
 	});
 
-	it('shares one in-flight backup download across groups and parses each separately', async () => {
+	it('shares one backup download for every subscriber in group 10', async () => {
 		const now = new Date('2026-11-26T12:00:00+02:00');
 		vi.useFakeTimers({ toFake: ['Date'] });
 		vi.setSystemTime(now);
@@ -731,14 +766,21 @@ describe('Chernivtsi electricity bot', () => {
 				await monitor.check();
 			});
 			expect(mirror).toHaveBeenCalledTimes(1);
-			expect(send).toHaveBeenCalledWith(expect.objectContaining({ chat_id: '123', text: expect.stringContaining('14:00–16:00') }));
-			expect(send).toHaveBeenCalledWith(expect.objectContaining({ chat_id: '456', text: expect.stringContaining('18:00–20:00') }));
+			const text = expect.stringContaining('<b>Schedule update · Chernivtsi · Group 10</b>');
+			expect(send).toHaveBeenCalledWith(expect.objectContaining({ chat_id: '123', text }));
+			expect(send).toHaveBeenCalledWith(expect.objectContaining({ chat_id: '456', text }));
 		} finally {
 			fetchMock.mockRestore();
 		}
 	});
 
 	it('welcomes the configured chat and remembers its language for later commands', async () => {
+		const now = new Date('2026-11-26T12:00:00+02:00');
+		vi.useFakeTimers({ toFake: ['Date'] });
+		vi.setSystemTime(now);
+		await runInDurableObject(bindings.MONITOR.getByName('chernivtsi'), async (_monitor, state) => {
+			await state.storage.put('energy-ua:browser-usage', { utcDay: '2026-11-26', usedMs: 0, lastAttempt: now.getTime() });
+		});
 		const sends: unknown[] = [];
 		const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, options) => {
 			if (url === source || url === backup) return new Response(null, { status: 503 });
@@ -769,7 +811,12 @@ describe('Chernivtsi electricity bot', () => {
 					reply_markup: expect.objectContaining({ keyboard: [[{ text: 'Українська' }, { text: 'English' }]] }),
 				}),
 				expect.objectContaining({ text: expect.stringContaining('Обрано українську мову') }),
-				expect.objectContaining({ parse_mode: 'HTML', text: expect.stringContaining('Актуальний графік наразі недоступний') }),
+				expect.objectContaining({
+					parse_mode: 'HTML',
+					text:
+						'<b>Стан на сьогодні · Чернівці · Група 10</b>\n────────────────────\n\n' +
+						'· <b>ЗАРАЗ</b>\nСтан невідомий\n· <b>ДАЛІ</b>\nЧас наступної зміни невідомий',
+				}),
 			]);
 		} finally {
 			fetchMock.mockRestore();
@@ -785,22 +832,33 @@ describe('schedule cards and reminders', () => {
 
 	it('shows the next change to expected power', () => {
 		const today = currentSchedule(result, now, '10', 'en');
-		expect(today).toContain('<b>NEXT</b> · <b>16:00</b> · Power expected');
-		expect(today).toContain('<b>14:00–16:00</b>');
+		expect(today).toBe(
+			'<b>Today status · Chernivtsi · Group 10</b>\n────────────────────\n\n' +
+				'· <b>NOW</b>\nOutage expected · <b>14:00–16:00</b>\n' +
+				'· <b>NEXT</b>\nPower expected · <b>16:00</b>\nOutage · <b>18:00–19:00</b>',
+		);
 	});
 
-	it('hides completed outages from Today and alerts and keeps future outages', () => {
+	it('puts the countdown on the next outage and leaves later intervals on their own lines', () => {
+		const beforeOutage = new Date('2026-11-26T12:45:00+02:00');
+		const example = {
+			schedule: { today: { ...result.schedule.today, slots: '1'.repeat(26) + '0'.repeat(6) + '1'.repeat(5) + '333' + '1'.repeat(8) } },
+		};
+		const today = currentSchedule(example, beforeOutage, '10', 'en', { checkedAt: beforeOutage.getTime() });
+		expect(today).toBe(
+			'<b>Today status · Chernivtsi · Group 10</b>\n────────────────────\n\n' +
+				'· <b>NOW</b>\nPower expected\n· <b>NEXT</b>\nOutage · <b>13:00–16:00</b> · <i>in 15 min</i>\n' +
+				'Supply uncertain · <b>18:30–20:00</b>\n<i>Updated at</i> <b>12:45</b>',
+		);
+	});
+
+	it('hides completed outages and keeps the upcoming schedule when a check fails', () => {
 		const endOfOutage = new Date('2026-11-26T16:00:00+02:00');
 		const today = currentSchedule(result, endOfOutage, '10', 'en');
 		expect(today).not.toContain('14:00–16:00');
 		expect(today).toContain('<b>18:00–19:00</b>');
-		const alert = notification(result, endOfOutage, '10', 'en').message;
-		expect(alert).not.toContain('14:00–16:00');
-		expect(alert).toContain('<b>18:00–19:00</b>');
-		const stale = currentSchedule(undefined, endOfOutage, '10', 'en', { stale: result.schedule });
-		expect(stale).toContain('<i>Previous schedule</i>');
-		expect(stale).not.toContain('14:00–16:00');
-		expect(stale).toContain('<b>18:00–19:00</b>');
+		const stale = currentSchedule(undefined, endOfOutage, '10', 'en', { stale: result.schedule, checkedAt: now.getTime() });
+		expect(stale).toBe(today + '\n<i>Last update</i> <b>15:45</b>');
 
 		const evening = new Date('2026-11-26T21:35:00+02:00');
 		expect(currentSchedule(result, evening, '10', 'en')).toContain('No more outages scheduled for today.');
@@ -809,28 +867,27 @@ describe('schedule cards and reminders', () => {
 		expect(ukrainian).not.toContain('18:00–19:00');
 	});
 
-	it('marks the schedule updated even when all revised outages are already over', () => {
+	it('records revisions to elapsed outages without sending an empty schedule update', () => {
 		const evening = new Date('2026-11-26T23:00:00+02:00');
 		const previous = { schedule: { today: { ...result.schedule.today, slots: '1'.repeat(48) } } };
-		const today = currentSchedule(result, evening, '10', 'en', { previous: previous.schedule });
+		const today = currentSchedule(result, evening, '10', 'en');
 		const alert = notification(result, evening, '10', 'en', previous);
-		for (const message of [today, alert.message]) {
-			expect(message).toContain('No more outages scheduled for today.\n\n✦ <b>Schedule updated</b>');
-			expect(message).not.toContain('14:00–16:00');
-			expect(message).not.toContain('18:00–19:00');
-		}
-		expect(notification(result, evening, '10', 'en', alert.snapshot).message).toBeUndefined();
+		expect(today).toContain('No more outages scheduled for today.');
+		expect(today).not.toMatch(/14:00–16:00|18:00–19:00|Updated/);
+		expect(alert.messages).toEqual([]);
+		expect(alert.snapshot.schedule).toEqual(result.schedule);
 	});
 
 	it('sends a clear 15-minute return reminder once and honors preferences', () => {
 		const previous = { schedule: result.schedule };
 		const reminder = notification(result, now, '10', 'en', previous);
-		expect(reminder.message).toContain('✦ <b>Power expected back · 16:00</b> · <i>in 15 min</i>');
-		expect(reminder.message).toMatch(/^<b>Chernivtsi · Group 10<\/b>\n────────────────────\n\n/u);
-		expect(reminder.message).not.toContain('⚡');
-		expect(notification(result, now, '10', 'en', reminder.snapshot).message).toBeUndefined();
-		expect(notification(result, now, '10', 'en', previous, { ...defaultAlerts, return: false }).message).toBeUndefined();
-		expect(notification(result, now, '10', 'en', previous, { ...defaultAlerts, minutes: 5 }).message).toBeUndefined();
+		expect(reminder.messages[0]?.text).toBe(
+			'<b>Power return · Chernivtsi · Group 10</b>\n────────────────────\n\n' +
+				'· <b>16:00</b> · Power expected back soon · <i>in 15 min</i>',
+		);
+		expect(notification(result, now, '10', 'en', reminder.snapshot).messages).toEqual([]);
+		expect(notification(result, now, '10', 'en', previous, { ...defaultAlerts, return: false }).messages).toEqual([]);
+		expect(notification(result, now, '10', 'en', previous, { ...defaultAlerts, minutes: 5 }).messages).toEqual([]);
 	});
 
 	it('remembers a legacy reminder when a revision removes and restores the same transition', () => {
@@ -838,15 +895,15 @@ describe('schedule cards and reminders', () => {
 		const revised = { schedule: { today: { date: '2026-11-26', slots: '1'.repeat(48) } } };
 		const preferences = { ...defaultAlerts, updates: false };
 		const { snapshot } = notification(revised, now, '10', 'en', previous, preferences);
-		expect(notification(result, now, '10', 'en', snapshot, preferences).message).toBeUndefined();
+		expect(notification(result, now, '10', 'en', snapshot, preferences).messages).toEqual([]);
 	});
 
 	it('does not present an uncertain interval as a return and describes revised intervals', () => {
 		const uncertain = result.schedule.today.slots.replace(/^(.){32}1/u, (prefix) => prefix.slice(0, -1) + '3');
 		const withUncertainty = { ...result, schedule: { ...result.schedule, today: { ...result.schedule.today, slots: uncertain } } };
 		const status = currentSchedule(withUncertainty, now, '10', 'en');
-		expect(status).toContain('<b>NEXT</b> · <b>16:00</b> · Supply uncertain');
-		expect(notification(withUncertainty, now, '10', 'en', { schedule: withUncertainty.schedule }).message).toBeUndefined();
+		expect(status).toContain('· <b>NEXT</b>\nSupply uncertain · <b>16:00–16:30</b>');
+		expect(notification(withUncertainty, now, '10', 'en', { schedule: withUncertainty.schedule }).messages).toEqual([]);
 		const revised = notification(
 			result,
 			now,
@@ -857,35 +914,33 @@ describe('schedule cards and reminders', () => {
 			},
 			{ ...defaultAlerts, return: false },
 		);
-		expect(revised.message).toContain('✦ <b>Schedule updated</b>');
-		expect(revised.message).not.toContain('14:00–14:30');
-		expect(revised.message).not.toContain('09:00–10:00');
-		expect(revised.message).toContain('<code>18:00–19:00</code> · Power expected → Outage expected');
+		const message = revised.messages[0]?.text;
+		expect(message).toContain('· <b>Updated</b>');
+		expect(message).not.toContain('14:00–14:30');
+		expect(message).not.toContain('09:00–10:00');
+		expect(message).toContain('<b>18:00–19:00</b> · Power expected → Outage expected');
 	});
 
 	it('lists all six schedule transitions and keeps every affected time range', () => {
 		const midnight = new Date('2026-11-26T00:00:00+02:00');
 		const previous = { today: { date: '2026-11-26', slots: '001133'.repeat(8) } };
 		const revised = { schedule: { today: { ...previous.today, slots: '130301'.repeat(8) } } };
-		const alert = notification(revised, midnight, '10', 'en', { schedule: previous }).message;
-		const today = currentSchedule(revised, midnight, '10', 'en', { previous });
-		for (const message of [alert, today]) {
-			const changes = message?.split('✦ <b>Schedule updated</b>\n')[1];
-			const lines = changes?.split('\n').filter((line) => line.startsWith('<code>')) ?? [];
-			expect(lines.map((line) => line.split(' · ')[1])).toEqual([
-				'Outage expected → Power expected',
-				'Outage expected → Supply uncertain',
-				'Power expected → Outage expected',
-				'Power expected → Supply uncertain',
-				'Supply uncertain → Outage expected',
-				'Supply uncertain → Power expected',
-			]);
-			for (const line of lines) expect(line.match(/<code>/g)).toHaveLength(8);
-			expect(lines.at(-1)).toContain('<code>23:30–24:00</code>');
-		}
+		const alert = notification(revised, midnight, '10', 'en', { schedule: previous }).messages[0]?.text;
+		const changes = alert?.split('· <b>Updated</b>\n')[1];
+		const lines = changes?.split('\n') ?? [];
+		expect(lines.map((line) => line.split(' · ')[1])).toEqual([
+			'Outage expected → Power expected',
+			'Outage expected → Supply uncertain',
+			'Power expected → Outage expected',
+			'Power expected → Supply uncertain',
+			'Supply uncertain → Outage expected',
+			'Supply uncertain → Power expected',
+		]);
+		for (const line of lines) expect(line.match(/<b>/g)).toHaveLength(8);
+		expect(lines.at(-1)).toContain('<b>23:30–24:00</b>');
 
-		const ukrainian = notification(revised, midnight, '10', 'uk', { schedule: previous }).message ?? '';
-		expect(ukrainian).toContain('✦ <b>Графік оновлено</b>');
+		const ukrainian = notification(revised, midnight, '10', 'uk', { schedule: previous }).messages[0]?.text ?? '';
+		expect(ukrainian).toContain('· <b>Оновлено</b>');
 		expect(ukrainian).toContain('Електропостачання невизначене → Очікується відключення');
 		expect(ukrainian.replace(/<[^>]+>/g, '').length).toBeLessThanOrEqual(4096);
 	});
