@@ -222,13 +222,11 @@ describe('Chernivtsi electricity bot', () => {
 		});
 		try {
 			await worker.scheduled(cron, bindings);
-			expect(send).toHaveBeenCalledTimes(1);
-			expect(send.mock.lastCall?.[0].text).not.toContain('Tomorrow');
+			expect(send).not.toHaveBeenCalled();
 			tomorrowStart = 15;
 			atMinute(3);
 			await worker.scheduled(cron, bindings);
-			expect(send).toHaveBeenCalledTimes(1);
-			send.mockClear();
+			expect(send).not.toHaveBeenCalled();
 
 			todayStart = 14;
 			atMinute(6);
@@ -293,10 +291,11 @@ describe('Chernivtsi electricity bot', () => {
 		});
 		try {
 			await worker.scheduled(cron, bindings);
+			expect(send).not.toHaveBeenCalled();
 			uncertain = true;
 			vi.setSystemTime(new Date('2026-11-26T23:00:00+02:00'));
 			await worker.scheduled(cron, bindings);
-			expect(send).toHaveBeenCalledTimes(2);
+			expect(send).toHaveBeenCalledTimes(1);
 			expect(send.mock.lastCall?.[0]).toMatchObject({ chat_id: '123', parse_mode: 'HTML' });
 			const message = send.mock.lastCall?.[0].text;
 			expect(message).toBe(
@@ -305,7 +304,7 @@ describe('Chernivtsi electricity bot', () => {
 			);
 			expect(message).not.toContain('16:00–17:00');
 			await worker.scheduled(cron, bindings);
-			expect(send).toHaveBeenCalledTimes(2);
+			expect(send).toHaveBeenCalledTimes(1);
 		} finally {
 			fetchMock.mockRestore();
 		}
@@ -401,17 +400,9 @@ describe('Chernivtsi electricity bot', () => {
 				chat_id: '456',
 				text: '<b>Чернівці · Група 10</b>\n────────────────────\n\n<b>Сповіщення увімкнено</b>',
 			});
+			const sentBeforeCheck = sends.length;
 			await worker.scheduled(cron, bindings);
-			const notices = sends.filter(
-				({ text }) => text.includes('<b>First published schedule</b>') || text.includes('<b>Перший опублікований графік</b>'),
-			);
-			expect(notices).toHaveLength(2);
-			expect(notices).toEqual(
-				expect.arrayContaining([
-					expect.objectContaining({ chat_id: '123', text: expect.stringContaining('Chernivtsi · Group 10') }),
-					expect.objectContaining({ chat_id: '456', text: expect.stringContaining('Чернівці · Група 10') }),
-				]),
-			);
+			expect(sends).toHaveLength(sentBeforeCheck);
 
 			expect((await post(63, 123, 'Stop alerts')).status).toBe(204);
 			expect(sends.at(-1)).toMatchObject({
@@ -551,7 +542,7 @@ describe('Chernivtsi electricity bot', () => {
 			});
 			await press(83, 'resume');
 			await worker.scheduled(createScheduledController({ cron: '* * * * *' }), bindings);
-			expect(sends.mock.lastCall?.[0].text).toContain('Group 10');
+			expect(sends).not.toHaveBeenCalled();
 			expect(fetchMock.mock.calls.filter(([url]) => url === source)).toHaveLength(1);
 			expect(fetchMock.mock.calls.some(([url]) => url === group11)).toBe(false);
 
@@ -626,6 +617,9 @@ describe('Chernivtsi electricity bot', () => {
 			return Response.json({ ok: true });
 		});
 		try {
+			await runInDurableObject(bindings.MONITOR.getByName('chernivtsi'), async (_monitor, state) => {
+				await state.storage.put('schedule:10:123', { schedule: { today: { date: '2026-11-26', slots: '1'.repeat(48) } } });
+			});
 			const status = await SELF.fetch('https://example.com/telegram', {
 				method: 'POST',
 				headers: { 'X-Telegram-Bot-Api-Secret-Token': secret },
@@ -634,17 +628,17 @@ describe('Chernivtsi electricity bot', () => {
 			expect(status.status).toBe(204);
 			await worker.scheduled(createScheduledController({ cron: '* * * * *' }), bindings);
 			expect(checks).toBe(2);
-			expect(sends).toHaveBeenCalledTimes(2);
+			expect(sends).toHaveBeenCalledTimes(1);
 			expect(sends.mock.calls[0][0]).toContain('Outage expected · <b>00:00–24:00</b>');
-			expect(sends.mock.calls[1][0]).toContain('· <b>First published schedule</b>');
 		} finally {
 			fetchMock.mockRestore();
 		}
 	});
 
 	it('retries a failed Telegram send and avoids duplicate notices after success', async () => {
-		const now = new Date();
-		const date = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Kyiv' }).format(now);
+		const now = new Date('2026-11-26T12:45:00+02:00');
+		vi.useFakeTimers({ toFake: ['Date'] });
+		vi.setSystemTime(now);
 		const telegram = vi
 			.fn()
 			.mockImplementationOnce(() => Response.json({ ok: false }, { status: 503 }))
@@ -656,7 +650,7 @@ describe('Chernivtsi electricity bot', () => {
 				: Response.json({ ok: true, result: [] }),
 		);
 		const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, options) => {
-			if (url === source) return energyPage(date, '00:00 – 24:00 Немає світла');
+			if (url === source) return energyPage('2026-11-26', '00:00 – 13:00 Є світло 13:00 – 24:00 Немає світла');
 			if (url === 'https://api.telegram.org/bottest-token/getUpdates') return poll();
 			expect(url).toBe('https://api.telegram.org/bottest-token/sendMessage');
 			expect(options?.method).toBe('POST');
@@ -683,7 +677,7 @@ describe('Chernivtsi electricity bot', () => {
 			expect(telegram).toHaveBeenLastCalledWith({
 				chat_id: '123',
 				parse_mode: 'HTML',
-				text: expect.stringContaining('<b>Schedule update · Chernivtsi · Group 10</b>'),
+				text: expect.stringContaining('<b>Outage reminder · Chernivtsi · Group 10</b>'),
 			});
 		} finally {
 			fetchMock.mockRestore();
@@ -693,12 +687,13 @@ describe('Chernivtsi electricity bot', () => {
 	it('retries only the reminder when a simultaneous schedule update has already been sent', async () => {
 		const now = new Date('2026-11-26T12:45:00+02:00');
 		vi.useFakeTimers({ toFake: ['Date'] });
-		vi.setSystemTime(now);
+		vi.setSystemTime(now.getTime() - 3 * 60_000);
 		const send = vi.fn<(_: { text: string }) => Response>(() => Response.json({ ok: true }));
 		send.mockImplementationOnce(() => Response.json({ ok: true }));
 		send.mockImplementationOnce(() => Response.json({ ok: false }, { status: 503 }));
 		const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, options) => {
 			if (url === source) {
+				if (Date.now() < now.getTime()) return energyPage('2026-11-26', '00:00 – 24:00 Є світло');
 				return energyPage('2026-11-26', '00:00 – 13:00 Є світло 13:00 – 16:00 Немає світла 16:00 – 24:00 Є світло');
 			}
 			if (String(url).endsWith('/getUpdates')) return Response.json({ ok: true, result: [] });
@@ -706,6 +701,8 @@ describe('Chernivtsi electricity bot', () => {
 		});
 		try {
 			const cron = createScheduledController({ cron: '* * * * *' });
+			await worker.scheduled(cron, bindings);
+			vi.setSystemTime(now);
 			await expect(worker.scheduled(cron, bindings)).rejects.toThrow('Telegram sendMessage failed. HTTP 503.');
 			await worker.scheduled(cron, bindings);
 			await worker.scheduled(cron, bindings);
@@ -720,7 +717,7 @@ describe('Chernivtsi electricity bot', () => {
 	});
 
 	it('does not send a notice when a chat pauses alerts during the schedule fetch', async () => {
-		const now = new Date('2026-11-26T12:00:00+02:00');
+		const now = new Date('2026-11-26T12:45:00+02:00');
 		vi.useFakeTimers({ toFake: ['Date'] });
 		vi.setSystemTime(now);
 		const scheduleRequested = Promise.withResolvers<void>();
@@ -748,7 +745,7 @@ describe('Chernivtsi electricity bot', () => {
 				try {
 					await vi.waitFor(async () => expect(await state.storage.get('telegram:subscribers')).toEqual([]));
 				} finally {
-					scheduleResponse.resolve(energyPage('2026-11-26', '00:00 – 24:00 Немає світла'));
+					scheduleResponse.resolve(energyPage('2026-11-26', '00:00 – 13:00 Є світло 13:00 – 24:00 Немає світла'));
 					await Promise.all([paused, cron]);
 				}
 			});
@@ -814,11 +811,11 @@ describe('Chernivtsi electricity bot', () => {
 					'energy-ua:browser-usage': { utcDay: '2026-11-26', usedMs: 0, lastAttempt: now.getTime() },
 				});
 				await monitor.check();
+				expect(await state.storage.get('schedule:10:123')).toBeDefined();
+				expect(await state.storage.get('schedule:10:456')).toBeDefined();
 			});
 			expect(mirror).toHaveBeenCalledTimes(1);
-			const text = expect.stringContaining('<b>Schedule update · Chernivtsi · Group 10</b>');
-			expect(send).toHaveBeenCalledWith(expect.objectContaining({ chat_id: '123', text }));
-			expect(send).toHaveBeenCalledWith(expect.objectContaining({ chat_id: '456', text }));
+			expect(send).not.toHaveBeenCalled();
 		} finally {
 			fetchMock.mockRestore();
 		}

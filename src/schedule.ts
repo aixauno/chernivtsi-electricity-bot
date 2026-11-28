@@ -165,11 +165,10 @@ export function notification(
 		schedule,
 		...(warnings.length > 0 && { warnings }),
 	};
-	if (preferences.updates && (!sameDay || changed)) {
-		const changes = sameDay ? describeUpdate(old, day, language, slot) : [];
-		if (!sameDay || changes.length) {
-			const heading = sameDay ? copy.updated : copy.initial;
-			const body = changes.length ? `· <b>${heading}</b>\n\n${changes.join('\n')}` : `· <b>${heading}</b>`;
+	if (preferences.updates && changed) {
+		const changes = describeUpdate(old, day, language, slot);
+		if (changes.length) {
+			const body = `· <b>${copy.updated}</b>\n\n${changes.join('\n')}`;
 			messagesToSend.push({ text: formatMessage(group, language, body, copy.updateTitle), snapshot });
 		}
 	}
